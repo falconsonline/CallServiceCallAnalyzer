@@ -651,11 +651,15 @@ def merge_pcaps(input_files, output_path):
         sys.exit(1)
 
 
-def process_pcap(log_path, pcap_pattern, pcap_output_path, extra_tids=None):
+def process_pcap(log_path, pcap_pattern, pcap_output_path, extra_tids=None,
+                 first_ts=None, last_ts=None):
     """Extract PCAP packets whose TCAP TID matches values found in log_path.
 
     extra_tids: optional iterable of hex TID strings discovered via trace-based
     PCAP filtering; merged with TIDs from log_path before filtering.
+    first_ts / last_ts: epoch float bounds derived from the DetailedTrace window.
+    Packets outside [first_ts - 5s, last_ts + 5s] are skipped even if TID matches,
+    preventing collisions with reused TIDs from other calls outside this window.
 
     Pipeline:
       1. Filter each original pcap with tshark (no dechunking) → fast per-file pass
@@ -676,7 +680,13 @@ def process_pcap(log_path, pcap_pattern, pcap_output_path, extra_tids=None):
         return
 
     logging.info("Found %d unique TID(s): %s", len(tids), ', '.join(tids))
-    display_filter = build_tshark_filter(tids)
+    _PCAP_WINDOW_BUFFER = 5.0
+    ts_first = (first_ts - _PCAP_WINDOW_BUFFER) if first_ts is not None else None
+    ts_last  = (last_ts  + _PCAP_WINDOW_BUFFER) if last_ts  is not None else None
+    if first_ts is not None:
+        logging.info("PCAP time window: %.3f – %.3f (±%.0fs buffer)",
+                     first_ts, last_ts, _PCAP_WINDOW_BUFFER)
+    display_filter = build_tshark_filter(tids, ts_first, ts_last)
     logging.info("Filter: %s", display_filter)
 
     pcap_files = sorted(glob.glob(pcap_pattern))
@@ -830,6 +840,28 @@ def _ts_to_epoch(timestamp_str, ms_str, tz=None):
         return dt.timestamp() + ms / 1000.0
     except (ValueError, AttributeError):
         return None
+
+
+def _detail_trace_epoch_window(detail_records: list, tz=None):
+    """Return (first_epoch, last_epoch) from parse_detail_trace_records() output.
+
+    Timestamps in those records are 'YYYY-MM-DD HH:MM:SS.mmm' (log-system local time).
+    tz: tzinfo from _parse_timezone(). None = assume local system time.
+    Returns (None, None) if records are empty or all timestamps fail to parse.
+    """
+    epochs = []
+    for r in detail_records:
+        ts = r.get('timestamp', '')
+        if not ts:
+            continue
+        try:
+            dt = datetime.strptime(ts.strip(), '%Y-%m-%d %H:%M:%S.%f')
+            if tz is not None:
+                dt = dt.replace(tzinfo=tz)
+            epochs.append(dt.timestamp())
+        except (ValueError, AttributeError):
+            continue
+    return (min(epochs), max(epochs)) if epochs else (None, None)
 
 
 def is_valid_sccp_digits(s):
@@ -2165,6 +2197,17 @@ def generate_transaction_html(flow_records, html_path, display_id,
         for spcs in signode_spcs.values():
             spcs['alias'] -= spcs['physical']
 
+        # Guarantee correct participant order: Remote → SmartSTP → TcapServer → CallService.
+        # When our_ips detection fails (no --signode, no matching PCAP IPs) signode_spcs
+        # stays empty; when tcap_instance is absent tcap_names stays [].  In both cases
+        # the drawing loop still emits arrows using 'SmartSTP'/'TcapServer' as fallbacks,
+        # but Mermaid would auto-create undeclared participants after CallService — making
+        # inbound arrows appear to flow right-to-left.
+        if not signode_spcs:
+            signode_spcs['SmartSTP'] = {'physical': set(), 'alias': set()}
+        if needs_tcap and not tcap_names:
+            tcap_names.append('TcapServer')
+
         if len(remote_entity_names) == 1:
             remote_name = next(iter(remote_entity_names))
         elif remote_entity_names:
@@ -2748,10 +2791,10 @@ def main():
                     )
                     process_tcap_events(args.tcap_event, search_terms, out_file)
 
-            if args.html and args.detail:
+            if args.detail:
                 detail_records_for_html = parse_detail_trace_records(
                     args.detail, args.id)
-                logging.info("DetailedTrace: %d in/out records for HTML",
+                logging.info("DetailedTrace: %d in/out records",
                              len(detail_records_for_html))
 
         print(f"Log extraction complete. Output written to: {log_output_path}")
@@ -2769,9 +2812,9 @@ def main():
         pcap_output_path = os.path.join(args.output_dir, f"{base_name}.pcap")
         if args.main:
             extra_tids = []
+            tz_for_trace = None
             pcap_files = sorted(glob.glob(args.pcaps))
             if pcap_files:
-                tz_for_trace = None
                 if args.timezone:
                     try:
                         tz_for_trace = _parse_timezone(args.timezone)
@@ -2789,8 +2832,14 @@ def main():
                                         f'frame.time_epoch <= {t_max + 1.0:.3f}')
                     logging.info("Trace-based supplementary filter: %s", pass1_filter)
                     extra_tids = _extract_tids_dechunked(pcap_files, pass1_filter)
+            first_ts, last_ts = _detail_trace_epoch_window(
+                detail_records_for_html, tz_for_trace)
+            if first_ts is not None:
+                logging.info("DetailedTrace window for PCAP filter: %.3f – %.3f",
+                             first_ts, last_ts)
             process_pcap(log_output_path, args.pcaps, pcap_output_path,
-                         extra_tids=extra_tids or None)
+                         extra_tids=extra_tids or None,
+                         first_ts=first_ts, last_ts=last_ts)
         else:
             if not args.timezone:
                 print(
