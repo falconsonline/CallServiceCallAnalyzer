@@ -1,0 +1,118 @@
+2026-05-11 04:32:12,539 | INFO | TcapServer search: 6 TCAP TID(s)
+2026-05-11 04:32:12,540 | INFO | TcapServer: initial hex TID search terms: ['00ea7503', '042e7fbe', '71a6cd3d', '7204032a', '72a6cd3d', '74a6cd3d']
+2026-05-11 04:32:12,540 | INFO | TcapServer: reading TcapServer-03.20260427-125019.log
+2026-05-11 04:32:12,557 | INFO | TcapServer: reading TcapServer-04.20260427-115521.log
+2026-05-11 04:32:12,613 | INFO | TcapServer Phase 1: 4 thread(s), 10 block(s), dialog IDs: ['1032381399']
+2026-05-11 04:32:12,619 | INFO | TcapServer: 10 block(s) from 4 thread(s); dialog IDs: ['1032381399']
+2026-05-11 04:32:12,620 | INFO | TcapServer: TID→dialog mapping: {'042e7fbe': '1032381399', '71a6cd3d': '1032381399', '72a6cd3d': '1032381399', '00ea7503': '1032381399', '7204032a': '1032381399', '74a6cd3d': '1032381399'}
+2026-05-11 04:32:12,622 | INFO | TcapServer PCAP: converting 2 file(s) with filter: tcap.tid == 00ea7503 || tcap.tid == 042e7fbe || tcap.tid == 71a6cd3d || tcap.tid == 7204032a || tcap.tid == 72a6cd3d || tcap.tid == 74a6cd3d
+[*] Input : TcapServer-03.20260427-125019.log
+[*] Output: /var/folders/2q/8bx63dl11_j2b6thxwqd08q00000gn/T/tmpi9_y215m/dk_0000.pcap
+[+] Done: /var/folders/2q/8bx63dl11_j2b6thxwqd08q00000gn/T/tmpi9_y215m/dk_0000.pcap  (647 packets)
+2026-05-11 04:32:12,785 | INFO |   TcapServer-03.20260427-125019.log -> 647 packet(s)
+[*] Input : TcapServer-04.20260427-115521.log
+[*] Output: /var/folders/2q/8bx63dl11_j2b6thxwqd08q00000gn/T/tmpi9_y215m/dk_0001.pcap
+[!] No valid packets detected.
+
+
+'00ea7503|042e7fbe|71a6cd3d|7204032a|72a6cd3d|74a6cd3d'
+
+
+TcapServer section is blank inspite of the output finding data
+debug console log extract:
+--------------------------
+2026-05-11 04:32:12,540 | INFO | TcapServer: initial hex TID search terms: ['00ea7503', '042e7fbe', '71a6cd3d', '7204032a', '72a6cd3d', '74a6cd3d']
+2026-05-11 04:32:12,540 | INFO | TcapServer: reading TcapServer-03.20260427-125019.log
+2026-05-11 04:32:12,557 | INFO | TcapServer: reading TcapServer-04.20260427-115521.log
+2026-05-11 04:32:12,613 | INFO | TcapServer Phase 1: 4 thread(s), 10 block(s), dialog IDs: ['1032381399']
+2026-05-11 04:32:12,619 | INFO | TcapServer: 10 block(s) from 4 thread(s); dialog IDs: ['1032381399']
+2026-05-11 04:32:12,620 | INFO | TcapServer: TID→dialog mapping: {'042e7fbe': '1032381399', '71a6cd3d': '1032381399', '72a6cd3d': '1032381399', '00ea7503': '1032381399', '7204032a': '1032381399', '74a6cd3d': '1032381399'}
+2026-05-11 04:32:12,622 | INFO | TcapServer PCAP: converting 2 file(s) with filter: tcap.tid == 00ea7503 || tcap.tid == 042e7fbe || tcap.tid == 71a6cd3d || tcap.tid == 7204032a || tcap.tid == 72a6cd3d || tcap.tid == 74a6cd3d
+[*] Input : TcapServer-03.20260427-125019.log
+[*] Output: /var/folders/2q/8bx63dl11_j2b6thxwqd08q00000gn/T/tmpi9_y215m/dk_0000.pcap
+[+] Done: /var/folders/2q/8bx63dl11_j2b6thxwqd08q00000gn/T/tmpi9_y215m/dk_0000.pcap  (647 packets)
+2026-05-11 04:32:12,785 | INFO |   TcapServer-03.20260427-125019.log -> 647 packet(s)
+[*] Input : TcapServer-04.20260427-115521.log
+[*] Output: /var/folders/2q/8bx63dl11_j2b6thxwqd08q00000gn/T/tmpi9_y215m/dk_0001.pcap
+[!] No valid packets detected.
+
+manual grep command:
+--------------------
+egrep '00ea7503|042e7fbe|71a6cd3d|7204032a|72a6cd3d|74a6cd3d' TcapServer-03.20260427-125019.log |wc -l
+      59
+	  
+>   egrep -i '00ea7503|042e7fbe|71a6cd3d|7204032a|72a6cd3d|74a6cd3d' TcapServer-03.20260427-125019.log |cut -f4 -d"|" |sort -u
+DD5FDB40
+E23FDB40
+E2BFEB40
+E33FFB40
+
+> grep "1032381399" TcapServer-03.20260427-125019.log |cut -f4 -d"|" |sort -u
+DD5FDB40
+E23FDB40
+E2BFEB40
+E33FFB40
+
+for tcapserver pcap analysis to find the relevant logs, below should be logic, 
+1) extract pcap which has tid match
+2) get date and timestamp in millisecs (3 decimals) from pcap
+3) parse tcapserver logs to get the thread which has the hex for exact timestamp match
+4) find then corresponding threadid and extract the logs.
+
+
+------
+2 types of Sigtran association
+a) M2PA
+	Our Node: IP Address, SPC
+	Adjacent Node: IP Address, SPC (Direct Sigtran assoication)
+	Remote Node:  SPC
+	
+	Our node can be determined by 2 details
+	1) Our node IP Address (denoted by CNSYS). Each Sigtran nodes have 2 IPs for redundancy.
+	CNSYS:IPADDR=172.26.131.2,IPADDR2=172.26.131.18,PER=0,AUTOACT=N;
+	In this example 172.26.131.2 and 172.26.131.18 are our node IPs.
+	2) Our Node SPC:
+	SNSLI:SNLINK=1,IPADDR=172.26.133.2,PPORT=5000,SS7MD=ITU14,HPORT=4087,SNTYPE=M2PA,M2PA=1,SNEND=S;
+    SNSLI:SNLINK=2,IPADDR=172.26.132.2,PPORT=5000,SS7MD=ITU14,HPORT=4087,SNTYPE=M2PA,M2PA=2,SNEND=S;
+	Denoted by SNSLI:SNLINK. This also tells if Sigtran association is M2PA or M3UA.
+	Here SNLINK=1 is Linkset#1 and 
+	SNLINK=2 is Linkset #2
+	Peer node IPs and ports as mentioned by IPADDRand PPORT. There can be multiple IP addresses to the Adjacent Node   
+	SPC of adjacent nodes are denoted by  MTP_LINKSET
+	e.g.
+	* MTP_LINKSET <linkset_id> <adjacent_spc> <num_links> <flags> <local_spc> <ssf>
+	MTP_LINKSET    0            6508              1       0x0001     7001      0x00
+	MTP_LINKSET    1            6371              1       0x0001     7001      0x00
+	
+	Here linkset_id 0 equals to SNLINK value 1 and linkset_id = SNLINK=2 and adjacent_spc accordingly and so is local_spc.
+	Remote SPCs are identified by MTP_ROUTE
+	*MTP_ROUTE <dpc> <norm_ls> <user_part_mask> <flags> <second_ls>
+	MTP_ROUTE  6508  0  0x0028 0x0000 1
+	MTP_ROUTE  6371  1  0x0028 0x0000 0
+	MTP_ROUTE  1401  0  0x0028 0x002b 1
+	MTP_ROUTE  14420  0  0x0028 0x002b 1
+	MTP_ROUTE  14421  1  0x0028 0x002b 0
+	MTP_ROUTE  14411  0  0x0028 0x002b 1
+	MTP_ROUTE  14459  0  0x0028 0x002b 1
+	MTP_ROUTE  14435  1  0x0028 0x002b 0
+	MTP_ROUTE  14482  0  0x0028 0x002b 1
+	MTP_ROUTE  14481  1  0x0028 0x002b 0
+	MTP_ROUTE  14498  0  0x0028 0x002b 1
+	MTP_ROUTE  14504  1  0x0028 0x002b 0
+	MTP_ROUTE  14523  0  0x0028 0x002b 1
+	MTP_ROUTE  14524  1  0x0028 0x002b 0
+	
+	These are configurations for 1 node. Typically this node signalling hosts SmartSTP also which has the Sigtran associations and local spc.
+	There could be multiple such nodes in the system.
+	
+	So we need to create a map of each Sigtran association to determine SmartSTP node. While analyzing pcap, messages intiated or received from and to our node can be seen on any one of the 2 IPs mentioned in CNSYS.
+	There could also be a Alias SPC configured on remote STP to send traffic to us. Any 
+
+
+
+
+--
+In the current plan, sorting the blocks is planned which will still lose the original sequencing in the logs. Once the details are found, parse though the original logs and extract in the correct order. Use timestamp and thread mapping combination to ensure correct data is extracted from the logs.
+
+
+

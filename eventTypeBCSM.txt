@@ -1,0 +1,18 @@
+EventTypeBCSMValue,EventTypeBCSMName
+1,origAttemptAuthorized
+2,collectedInfo
+3,analyzedInformation
+4,routeSelectFailure
+5,oCalledPartyBusy
+6,oNoAnswer
+7,oAnswer
+8,oMidCall
+9,oDisconnect
+10,oAbandon
+12,termAttemptAuthorized
+13,tBusy / tCalledPartyBusy
+14,tNoAnswer
+15,tAnswer
+16,tMidCall
+17,tDisconnect
+18,tAbandon

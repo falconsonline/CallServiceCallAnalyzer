@@ -1,0 +1,8 @@
+applogs/*
+logs/*
+old/*
+pcaps/*
+smart-stp*
+__pycache__/
+*.pyc
+.claude/
