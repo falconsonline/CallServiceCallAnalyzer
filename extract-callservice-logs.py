@@ -2715,7 +2715,8 @@ def main():
                         help="Glob pattern for main log file(s). Omit to use trace-based PCAP extraction.")
     parser.add_argument("-i", "--id", required=True, help="StateMachineId to extract")
     parser.add_argument("-o", "--output-dir", default="logs", help="Output directory")
-    parser.add_argument("-p", "--pcaps", default=None, help="Glob pattern for PCAP file(s) (optional)")
+    parser.add_argument("-p", "--pcaps", default=None,
+                        help="Glob pattern for PCAP file(s). Requires -z/--timezone.")
     parser.add_argument("-n", "--testcase", default=None, help="Test case name prefix for output filenames")
     parser.add_argument("-t",  "--tcap",       default=None, help="Glob for TcapServer log(s)")
     parser.add_argument("-te", "--tcap-event", default=None, dest="tcap_event",
@@ -2734,6 +2735,15 @@ def main():
                              "Used for PCAP direction detection. Overrides auto-detection.")
 
     args = parser.parse_args()
+
+    if args.pcaps and not args.timezone:
+        print(
+            "\nERROR: -z/--timezone is required when -p (PCAP extraction) is used.\n"
+            "Run the following on the log system to get its UTC offset:\n\n"
+            '    date +"%z"\n\n'
+            "Then re-run with:  -z <offset>  e.g.  -z \"+0400\"\n",
+            file=sys.stderr)
+        sys.exit(1)
 
     try:
         setup_logging(args.debug, args.output_dir)
