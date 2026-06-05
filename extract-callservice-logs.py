@@ -2708,31 +2708,53 @@ def generate_transaction_html(flow_records, html_path, display_id,
 
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Extract logs and packets based on FSMId")
-    parser.add_argument("-s", "--summary", required=True, help="Glob pattern for SummaryTrace file(s)")
-    parser.add_argument("-d", "--detail", required=True, help="Glob pattern for DetailedTrace file(s)")
-    parser.add_argument("-m", "--main", required=False, default=None,
-                        help="Glob pattern for main log file(s). Omit to use trace-based PCAP extraction.")
-    parser.add_argument("-i", "--id", required=True, help="StateMachineId to extract")
-    parser.add_argument("-o", "--output-dir", default="logs", help="Output directory")
+    parser = argparse.ArgumentParser(
+        description="Extract logs and packets for a call identified by its FSMId.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "MANDATORY arguments:  -s, -d, -i\n"
+            "CONDITIONAL mandatory:\n"
+            "  -z  required when -p is given (PCAP timestamp window needs explicit timezone)\n"
+            "  -t  required when --html is given\n"
+        ),
+    )
+    parser.add_argument("-s", "--summary",  required=True,
+                        help="[MANDATORY] Glob pattern for SummaryTrace file(s)")
+    parser.add_argument("-d", "--detail",   required=True,
+                        help="[MANDATORY] Glob pattern for DetailedTrace file(s)")
+    parser.add_argument("-i", "--id",       required=True,
+                        help="[MANDATORY] FSMId / StateMachineId to extract")
+    parser.add_argument("-m", "--main",     required=False, default=None,
+                        help="Glob pattern for main CallService log file(s). "
+                             "Omit to use trace-based PCAP extraction only.")
+    parser.add_argument("-o", "--output-dir", default="logs",
+                        help="Output directory (default: logs/)")
     parser.add_argument("-p", "--pcaps", default=None,
-                        help="Glob pattern for PCAP file(s). Requires -z/--timezone.")
-    parser.add_argument("-n", "--testcase", default=None, help="Test case name prefix for output filenames")
-    parser.add_argument("-t",  "--tcap",       default=None, help="Glob for TcapServer log(s)")
-    parser.add_argument("-te", "--tcap-event", default=None, dest="tcap_event",
-                        help="Glob for TcapServerEvent log(s)")
+                        help="Glob pattern for PCAP capture file(s). "
+                             "[MANDATORY with -p]: -z/--timezone must also be supplied.")
     parser.add_argument("-z", "--timezone", default=None,
-                        help='Timezone of the log system. Accepts IANA names '
-                             '("America/Mexico_City") or fixed UTC offsets '
-                             '("-0500", "+0530", "UTC-5"). Use a fixed offset '
-                             'when IANA DST rules differ from the actual system.')
-    parser.add_argument("-v", "--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--html", action="store_true", help="Generate HTML transaction diagram (requires -t)")
+                        help="[MANDATORY when -p is used] Timezone of the log system. "
+                             "Accepts IANA names (\"America/Mexico_City\") or fixed UTC "
+                             "offsets (\"-0500\", \"+0530\", \"UTC-5\"). Use a fixed offset "
+                             "when IANA DST rules differ from the actual system. "
+                             "Run 'date +\"%%z\"' on the log system to find the value.")
+    parser.add_argument("-t",  "--tcap", default=None,
+                        help="Glob for TcapServer log file(s). "
+                             "[MANDATORY when --html is used]")
+    parser.add_argument("-te", "--tcap-event", default=None, dest="tcap_event",
+                        help="Glob for TcapServerEvent log file(s) (optional)")
+    parser.add_argument("-n", "--testcase", default=None,
+                        help="Test case name prefix for output filenames (optional)")
+    parser.add_argument("-v", "--debug", action="store_true",
+                        help="Enable verbose debug logging")
+    parser.add_argument("--html", action="store_true",
+                        help="Generate HTML mermaid sequence diagram. "
+                             "[MANDATORY with --html]: -t/--tcap must also be supplied.")
     parser.add_argument("--signode", action="append", dest="signodes", default=None,
                         metavar="NAME:IP1,IP2",
                         help="Signalling node name and its Sigtran IPs (repeatable). "
                              "Example: --signode 'signode1:172.26.131.18,172.26.131.19'. "
-                             "Used for PCAP direction detection. Overrides auto-detection.")
+                             "Used for PCAP direction detection; overrides auto-detection.")
 
     args = parser.parse_args()
 
