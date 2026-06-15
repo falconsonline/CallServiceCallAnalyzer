@@ -1513,7 +1513,7 @@ def process_tcap_logs(file_pattern, tcap_tids, out_handle, tcap_pcap_path=None):
                 break
         forwarded_to_app = any(_TCAP_SEND_APP_RE.search(l) for l in blk['lines'])
         sent_to_nw       = any(_TCAP_SEND_NW_RE.search(l)  for l in blk['lines'])
-        outgoing = forwarded_to_app or sent_to_nw
+        outgoing = sent_to_nw
         flow_records.append({
             'dialog_id':        did,
             'thread_type':      blk['thread_type'],

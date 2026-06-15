@@ -475,7 +475,59 @@ def test_process_pcap_from_traces_empty_trace_fields(tmp_path):
     assert not (tmp_path / "out.pcap").exists()
 
 
-from extract_callservice_logs import build_tshark_filter
+from extract_callservice_logs import build_tshark_filter, process_tcap_logs
+import io
+
+
+def _write_tcap_log(tmp_path, fsmid, dialog_id, thread_hex, direction):
+    """Write a minimal TcapServer log with one complete block.
+
+    direction='in'  -> Received from n/w ... Sending to App
+    direction='out' -> Received from App ... Sending to n/w
+    """
+    if direction == 'in':
+        start_marker = 'Received from n/w'
+        end_marker   = 'Sending to App'
+    else:
+        start_marker = 'Received from App'
+        end_marker   = 'Sending to n/w'
+
+    def L(content):
+        return f"2026-04-27 12:49:05,100 | INFO | Tcap | {thread_hex} | {dialog_id} | {content}\n"
+
+    f = tmp_path / "TcapServer.log"
+    f.write_text(
+        L(start_marker) +
+        L(f"StateMachineId={fsmid} Dialog[{dialog_id}]") +
+        L(end_marker)
+    )
+    return str(tmp_path / "TcapServer*")
+
+
+def test_tcapserver_sending_to_app_is_inbound(tmp_path):
+    """'Sending to App' means TcapServer forwarded a network message to CallService -- inbound."""
+    fsmid = "ab12cd34ef56789"
+    glob  = _write_tcap_log(tmp_path, fsmid, '12345678', 'DD5FDB40', direction='in')
+    out   = io.StringIO()
+    _, flow_records, _ = process_tcap_logs(glob, [fsmid[:8]], out)
+    non_pcap = [r for r in flow_records if r.get('source') != 'pcap']
+    assert non_pcap, "Expected at least one TcapServer flow record"
+    assert all(r['direction'] == 'in' for r in non_pcap), (
+        f"Expected all inbound, got: {[r['direction'] for r in non_pcap]}"
+    )
+
+
+def test_tcapserver_sending_to_nw_is_outbound(tmp_path):
+    """'Sending to n/w' means TcapServer sent an app message to the network -- outbound."""
+    fsmid = "ab12cd34ef56789"
+    glob  = _write_tcap_log(tmp_path, fsmid, '12345678', 'DD5FDB40', direction='out')
+    out   = io.StringIO()
+    _, flow_records, _ = process_tcap_logs(glob, [fsmid[:8]], out)
+    non_pcap = [r for r in flow_records if r.get('source') != 'pcap']
+    assert non_pcap, "Expected at least one TcapServer flow record"
+    assert all(r['direction'] == 'out' for r in non_pcap), (
+        f"Expected all outbound, got: {[r['direction'] for r in non_pcap]}"
+    )
 
 
 def test_build_tshark_filter_uses_otid_dtid():
