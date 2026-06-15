@@ -478,21 +478,23 @@ def test_process_pcap_from_traces_empty_trace_fields(tmp_path):
 from extract_callservice_logs import build_tshark_filter
 
 
-def test_build_tshark_filter_quotes_tids():
+def test_build_tshark_filter_uses_otid_dtid():
     f = build_tshark_filter(['118459e7', '042e7fbe'])
-    assert 'tcap.tid == 11:84:59:e7' in f
-    assert 'tcap.tid == 04:2e:7f:be' in f
+    assert 'tcap.otid == 11:84:59:e7' in f
+    assert 'tcap.dtid == 11:84:59:e7' in f
+    assert 'tcap.otid == 04:2e:7f:be' in f
+    assert 'tcap.dtid == 04:2e:7f:be' in f
 
 
 def test_build_tshark_filter_no_bare_hex():
     f = build_tshark_filter(['118459e7'])
-    assert '"118459e7"' not in f          # no quoted hex string
-    assert 'tcap.tid == 11:84:59:e7' in f
+    assert '"118459e7"' not in f
+    assert 'tcap.otid == 11:84:59:e7' in f
 
 
 def test_build_tshark_filter_with_time_window():
     f = build_tshark_filter(['042e7fbe'], first_ts=1777312145.0, last_ts=1777312999.0)
-    assert 'tcap.tid == 04:2e:7f:be' in f
+    assert 'tcap.otid == 04:2e:7f:be' in f
     assert 'frame.time_epoch >= 1777312144.800' in f
     assert 'frame.time_epoch <= 1777312999.200' in f
 
@@ -500,4 +502,4 @@ def test_build_tshark_filter_with_time_window():
 def test_build_tshark_filter_no_time_window():
     f = build_tshark_filter(['042e7fbe'])
     assert 'frame.time_epoch' not in f
-    assert 'tcap.tid == 04:2e:7f:be' in f
+    assert 'tcap.otid == 04:2e:7f:be' in f
