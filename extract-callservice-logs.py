@@ -1595,37 +1595,59 @@ def _detect_our_ips(detail_records: list, flow_records: list,
     """Infer our node's Sigtran IPs from DetailedTrace direction + PCAP ip fields.
 
     When node_ip_map is provided (from --signode), use those IPs directly.
-    Otherwise cross-reference DetailedTrace direction with PCAP ip.src/dst.
+    Otherwise, pair each DetailedTrace record to the closest-timestamp PCAP record
+    in the same dialog and tally IP candidates:
+      direction='in'  → ip_dst is a candidate 'our IP'
+      direction='out' → ip_src is a candidate 'our IP'
+    The IP(s) with the most votes become our_ips.
     """
     if node_ip_map:
         our_ips = set(node_ip_map.keys())
         logging.info("Using explicit our Sigtran IPs from --signode: %s", our_ips)
         return our_ips
 
-    did_direction: dict = {}
-    for r in detail_records:
-        did = r.get('dialog_id', '')
-        if did and did not in did_direction:
-            did_direction[did] = r['direction']
+    def _ts_sec(ts: str) -> float:
+        try:
+            t = ts.strip().split(' ')[-1]
+            h, mi, s = t[:12].split(':')
+            return int(h) * 3600 + int(mi) * 60 + float(s)
+        except Exception:
+            return 0.0
 
-    our_ips: set = set()
+    pcap_by_did: dict = defaultdict(list)
     for r in flow_records:
-        if r.get('source') != 'pcap':
-            continue
-        did  = r.get('dialog_id', '')
-        dirn = did_direction.get(did, '')
-        pcap = r.get('pcap', {})
-        ip_src = pcap.get('ip_src', '')
-        ip_dst = pcap.get('ip_dst', '')
-        if dirn == 'in' and ip_dst:
-            our_ips.add(ip_dst)
-        elif dirn == 'out' and ip_src:
-            our_ips.add(ip_src)
+        if r.get('source') == 'pcap':
+            did = r.get('dialog_id', '')
+            if did:
+                pcap_by_did[did].append(r)
 
-    if our_ips:
-        logging.info("Detected our Sigtran IPs: %s", our_ips)
-    else:
+    ip_votes: dict = defaultdict(int)
+    for r in detail_records:
+        did  = r.get('dialog_id', '')
+        dirn = r.get('direction', '')
+        if not did or dirn not in ('in', 'out'):
+            continue
+        candidates = pcap_by_did.get(did, [])
+        if not candidates:
+            continue
+        ref_sec = _ts_sec(r.get('timestamp', ''))
+        best    = min(candidates,
+                      key=lambda p: abs(_ts_sec(p.get('timestamp', '')) - ref_sec))
+        pcap    = best.get('pcap', {})
+        ip_src  = pcap.get('ip_src', '')
+        ip_dst  = pcap.get('ip_dst', '')
+        if dirn == 'in' and ip_dst:
+            ip_votes[ip_dst] += 1
+        elif dirn == 'out' and ip_src:
+            ip_votes[ip_src] += 1
+
+    if not ip_votes:
         logging.warning("Could not auto-detect our Sigtran IPs — PCAP direction may be approximate")
+        return set()
+
+    max_votes = max(ip_votes.values())
+    our_ips   = {ip for ip, v in ip_votes.items() if v == max_votes}
+    logging.info("Detected our Sigtran IPs: %s (votes: %s)", our_ips, dict(ip_votes))
     return our_ips
 
 

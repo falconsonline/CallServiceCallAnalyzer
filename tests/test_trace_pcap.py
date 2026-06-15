@@ -555,3 +555,51 @@ def test_build_tshark_filter_no_time_window():
     f = build_tshark_filter(['042e7fbe'])
     assert 'frame.time_epoch' not in f
     assert 'tcap.otid == 04:2e:7f:be' in f
+
+
+from extract_callservice_logs import _detect_our_ips
+
+
+def test_detect_our_ips_rejects_remote_ip():
+    """Old first-record approach adds remote IP when first PCAP record is outbound
+    but first detail record is 'in'. Counter + timestamp matching must exclude it."""
+    detail_records = [
+        {'dialog_id': 'D1', 'direction': 'in', 'timestamp': '2026-01-01 10:00:02.000'},
+    ]
+    flow_records = [
+        # First PCAP record is outbound Begin (our node sent to remote)
+        {
+            'source': 'pcap', 'dialog_id': 'D1',
+            'timestamp': '2026-01-01 10:00:01.000',
+            'pcap': {'ip_src': '10.0.0.2', 'ip_dst': '10.0.0.1', 'ts': '10:00:01.000'},
+        },
+        # Second PCAP record is inbound response — matches the detail record
+        {
+            'source': 'pcap', 'dialog_id': 'D1',
+            'timestamp': '2026-01-01 10:00:02.000',
+            'pcap': {'ip_src': '10.0.0.1', 'ip_dst': '10.0.0.2', 'ts': '10:00:02.000'},
+        },
+    ]
+    our_ips = _detect_our_ips(detail_records, flow_records)
+    assert '10.0.0.2' in our_ips, f"Expected 10.0.0.2 as our IP, got {our_ips}"
+    assert '10.0.0.1' not in our_ips, f"Remote IP 10.0.0.1 should not be in our_ips, got {our_ips}"
+
+
+def test_detect_our_ips_majority_vote_across_dialogs():
+    """Votes across multiple detail records and dialogs converge on the correct IP."""
+    detail_records = [
+        {'dialog_id': 'D1', 'direction': 'in',  'timestamp': '2026-01-01 10:00:01.000'},
+        {'dialog_id': 'D1', 'direction': 'out', 'timestamp': '2026-01-01 10:00:02.000'},
+        {'dialog_id': 'D2', 'direction': 'in',  'timestamp': '2026-01-01 10:00:03.000'},
+    ]
+    flow_records = [
+        {'source': 'pcap', 'dialog_id': 'D1', 'timestamp': '2026-01-01 10:00:01.000',
+         'pcap': {'ip_src': '10.0.0.1', 'ip_dst': '10.0.0.2', 'ts': '10:00:01.000'}},
+        {'source': 'pcap', 'dialog_id': 'D1', 'timestamp': '2026-01-01 10:00:02.000',
+         'pcap': {'ip_src': '10.0.0.2', 'ip_dst': '10.0.0.1', 'ts': '10:00:02.000'}},
+        {'source': 'pcap', 'dialog_id': 'D2', 'timestamp': '2026-01-01 10:00:03.000',
+         'pcap': {'ip_src': '10.0.0.1', 'ip_dst': '10.0.0.2', 'ts': '10:00:03.000'}},
+    ]
+    our_ips = _detect_our_ips(detail_records, flow_records)
+    assert '10.0.0.2' in our_ips
+    assert '10.0.0.1' not in our_ips
