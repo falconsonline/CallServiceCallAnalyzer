@@ -477,6 +477,67 @@ def test_process_pcap_from_traces_empty_trace_fields(tmp_path):
 
 from extract_callservice_logs import build_tshark_filter, process_tcap_logs
 import io
+from extract_callservice_logs import process_main_log
+
+
+def _main_line(fsmid, thread, event, content='data', ms='100', n='1'):
+    """Pipe-delimited callservice log line with FSMId in field 5 (index 4)."""
+    return (f"2026-04-27 12:49:05,{ms} | INFO | Logger | {thread} "
+            f"| {fsmid}:{event} | {content} | Cls | m | {n}")
+
+
+def _nofsmid_line(thread, content='data', ms='100', n='1'):
+    """Pipe-delimited line on a thread but with no FSMId in field 5."""
+    return (f"2026-04-27 12:49:05,{ms} | INFO | Logger | {thread} "
+            f"| noFsmId | {content} | Cls | m | {n}")
+
+
+def test_process_main_log_caps_lines_after_release(tmp_path):
+    """Lines on the tracked thread more than TRAILING_AFTER_RELEASE positions after
+    'Releasing state machine' must not appear in the output."""
+    fsmid = "abc123def456789"
+    lines = [
+        _main_line(fsmid, 'Thread-1', 'Start', ms='100', n='1'),
+        _main_line(fsmid, 'Thread-1', 'Release',
+                   content='Releasing state machine', ms='200', n='2'),
+        _nofsmid_line('Thread-1', content='cleanup1', ms='300', n='3'),   # within cap
+        _nofsmid_line('Thread-1', content='cleanup2', ms='400', n='4'),   # within cap
+        _nofsmid_line('Thread-1', content='cleanup3', ms='450', n='45'),  # within cap (cap=3)
+        _nofsmid_line('Thread-1', content='new_call_here', ms='500', n='5'),  # BEYOND cap
+    ]
+    f = tmp_path / "callservice.log"
+    f.write_text('\n'.join(lines) + '\n')
+
+    out = io.StringIO()
+    process_main_log(str(tmp_path / "callservice*"), fsmid, out)
+    result = out.getvalue()
+
+    assert 'cleanup1' in result
+    assert 'cleanup2' in result
+    assert 'cleanup3' in result
+    assert 'new_call_here' not in result, (
+        "Lines beyond TRAILING_AFTER_RELEASE after 'Releasing state machine' must be excluded"
+    )
+
+
+def test_process_main_log_no_release_line_unchanged(tmp_path):
+    """When no 'Releasing state machine' line exists, trailing thread lines are still included."""
+    fsmid = "abc123def456789"
+    lines = [
+        _main_line(fsmid, 'Thread-1', 'Start', ms='100', n='1'),
+        _main_line(fsmid, 'Thread-1', 'Proceed', ms='200', n='2'),
+        _nofsmid_line('Thread-1', content='trailing1', ms='300', n='3'),
+        _nofsmid_line('Thread-1', content='trailing2', ms='400', n='4'),
+    ]
+    f = tmp_path / "callservice.log"
+    f.write_text('\n'.join(lines) + '\n')
+
+    out = io.StringIO()
+    process_main_log(str(tmp_path / "callservice*"), fsmid, out)
+    result = out.getvalue()
+
+    assert 'trailing1' in result
+    assert 'trailing2' in result
 
 
 def _write_tcap_log(tmp_path, fsmid, dialog_id, thread_hex, direction):

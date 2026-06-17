@@ -259,7 +259,7 @@ def is_log_entry_end(line):
     stripped = line.rstrip('\n\r')
     if '|' not in stripped:
         return False
-    return stripped.split('|')[-1].isdigit()
+    return stripped.split('|')[-1].strip().isdigit()
 
 
 def process_simple_search(file_pattern, fsmid, section_name, out_handle):
@@ -351,6 +351,7 @@ def process_main_log(file_pattern, fsmid, out_handle):
         print(f"Log Extract: no files found for pattern: {file_pattern}")
     MAX_LINES_IN_BLOCK = 1000
     BACKTRACK_LIMIT = 500
+    TRAILING_AFTER_RELEASE = 3
     fsmid_len = len(target_fsmid)
     fsmid_hex_re = re.compile(rf'\b[0-9a-f]{{{fsmid_len}}}\b')
 
@@ -367,6 +368,7 @@ def process_main_log(file_pattern, fsmid, out_handle):
             # PASS 1: Identify FSMId lines and threads
             fsmid_line_indices = []
             thread_map = {}  # thread_name -> first_line_idx_with_fsmid
+            release_indices = {}
 
             for idx, line in enumerate(lines):
                 if target_fsmid in line.lower():
@@ -374,6 +376,9 @@ def process_main_log(file_pattern, fsmid, out_handle):
                     thread = parse_thread(line)
                     if thread and thread not in thread_map:
                         thread_map[thread] = idx
+                    if ('releasing state machine' in line.lower()
+                            and thread and thread not in release_indices):
+                        release_indices[thread] = idx
 
             if not fsmid_line_indices:
                 logging.debug("No FSMId occurrences found in %s", file_path)
@@ -432,9 +437,15 @@ def process_main_log(file_pattern, fsmid, out_handle):
                         pending = []  # consumed — start fresh after any fsmid line
                     else:
                         pending.append(idx)
-                # No-fsmid lines trailing after the last target fsmid belong to the target
+                # No-fsmid lines trailing after the last target fsmid belong to the target,
+                # capped at TRAILING_AFTER_RELEASE lines past any "Releasing state machine" line.
                 if last_was_target:
-                    target_context_indices.update(pending)
+                    release_idx = release_indices.get(thread)
+                    if release_idx is not None:
+                        capped = [i for i in pending if i <= release_idx + TRAILING_AFTER_RELEASE]
+                        target_context_indices.update(capped)
+                    else:
+                        target_context_indices.update(pending)
 
             # PASS 3 & 4: Extract FSMId lines and ASN.1 blocks
             written_indices = set()
