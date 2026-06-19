@@ -2799,16 +2799,27 @@ def main():
         description="Extract logs and packets for a call identified by its FSMId.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "MANDATORY arguments:  -s, -d, -i\n"
+            "MANDATORY arguments:  -f/--trace (at least one), -i\n"
             "CONDITIONAL mandatory:\n"
             "  -z  required when -p is given (PCAP timestamp window needs explicit timezone)\n"
             "  -t  required when --html is given\n"
+            "Backward compat: --summary and --detail are accepted as aliases for --trace.\n"
         ),
     )
-    parser.add_argument("-s", "--summary",  required=True,
-                        help="[MANDATORY] Glob pattern for SummaryTrace file(s)")
-    parser.add_argument("-d", "--detail",   required=True,
-                        help="[MANDATORY] Glob pattern for DetailedTrace file(s)")
+    parser.add_argument("-f", "--trace", action="append", dest="trace", default=None,
+                        metavar="GLOB",
+                        help="[MANDATORY, repeatable] Glob pattern for a trace file group. "
+                             "Files named SummaryTrace* and DetailTrace*/DetailedTrace* are "
+                             "automatically used for PCAP correlation and HTML diagram. "
+                             "Each pattern produces a separate output section whose header "
+                             "is derived from the file prefix (date/version suffix stripped). "
+                             "Example: --trace 'applogs/SummaryTrace*' "
+                             "--trace 'applogs/DetailTrace*' --trace 'applogs/applog*'")
+    # Deprecated aliases — kept for backward compat, hidden from --help
+    parser.add_argument("-s", "--summary", action="append", dest="trace",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("-d", "--detail",  action="append", dest="trace",
+                        help=argparse.SUPPRESS)
     parser.add_argument("-i", "--id",       required=True,
                         help="[MANDATORY] FSMId / StateMachineId to extract")
     parser.add_argument("-m", "--main",     required=False, default=None,
@@ -2845,6 +2856,19 @@ def main():
 
     args = parser.parse_args()
 
+    if not args.trace:
+        print(
+            "\nERROR: at least one -f/--trace argument is required.\n"
+            "Example: --trace 'applogs/SummaryTrace*' --trace 'applogs/DetailTrace*'\n",
+            file=sys.stderr)
+        sys.exit(1)
+
+    # Derive summary/detail globs for PCAP correlation (first matching pattern wins)
+    _summary_patterns = [p for p in args.trace if _is_summary_trace(p)]
+    _detail_patterns  = [p for p in args.trace if _is_detail_trace(p)]
+    _summary_glob     = _summary_patterns[0] if _summary_patterns else None
+    _detail_glob      = _detail_patterns[0]  if _detail_patterns  else None
+
     if args.pcaps and not args.timezone:
         print(
             "\nERROR: -z/--timezone is required when -p (PCAP extraction) is used.\n"
@@ -2878,8 +2902,9 @@ def main():
 
     try:
         with open(log_output_path, 'w') as out_file:
-            process_simple_search(args.summary, args.id, "SummaryTrace", out_file)
-            process_simple_search(args.detail, args.id, "DetailedTrace", out_file)
+            for _pattern in args.trace:
+                _header = _extract_trace_prefix(_pattern)
+                process_simple_search(_pattern, args.id, _header, out_file)
             if args.main:
                 process_main_log(args.main, args.id, out_file)
 
@@ -2910,9 +2935,9 @@ def main():
                     )
                     process_tcap_events(args.tcap_event, search_terms, out_file)
 
-            if args.detail:
+            if _detail_glob:
                 detail_records_for_html = parse_detail_trace_records(
-                    args.detail, args.id)
+                    _detail_glob, args.id)
                 logging.info("DetailedTrace: %d in/out records",
                              len(detail_records_for_html))
 
@@ -2939,8 +2964,10 @@ def main():
                         tz_for_trace = _parse_timezone(args.timezone)
                     except Exception:
                         pass
-                summary_fields = parse_summary_trace_fields(args.summary, args.id)
-                detail_sccp    = parse_detail_trace_sccp_fields(args.detail, args.id)
+                summary_fields = (parse_summary_trace_fields(_summary_glob, args.id)
+                                  if _summary_glob else [])
+                detail_sccp    = (parse_detail_trace_sccp_fields(_detail_glob, args.id)
+                                  if _detail_glob else [])
                 trace_filter, t_min, t_max = build_trace_based_filter(
                     summary_fields, detail_sccp, tz_for_trace)
                 if trace_filter:
@@ -2975,7 +3002,7 @@ def main():
                 logging.error("Invalid --timezone %r: %s", args.timezone, e)
                 sys.exit(1)
             process_pcap_from_traces(
-                args.summary, args.detail, args.id, args.pcaps, pcap_output_path, tz)
+                _summary_glob or '', _detail_glob or '', args.id, args.pcaps, pcap_output_path, tz)
 
     # --- HTML Transaction Summary Diagram ----------------------------------
     if args.html and args.tcap and (flow_records or detail_records_for_html):

@@ -715,3 +715,24 @@ def test_is_detail_trace_true():
 def test_is_detail_trace_false():
     assert _is_detail_trace("SummaryTrace*") is False
     assert _is_detail_trace("applog*") is False
+
+
+def test_trace_flag_in_help():
+    result = subprocess.run(
+        [sys.executable, SCRIPT, '--help'],
+        capture_output=True, text=True
+    )
+    assert '--trace' in result.stdout or '-f' in result.stdout, (
+        f"--trace/-f should appear in help, got:\n{result.stdout}"
+    )
+    # -s and -d should NOT appear in help (they are hidden aliases)
+    assert '-s ' not in result.stdout, "-s should be hidden from help"
+    assert '-d ' not in result.stdout, "-d should be hidden from help"
+
+
+def test_trace_requires_at_least_one():
+    result = subprocess.run(
+        [sys.executable, SCRIPT, '-i', 'abc123'],
+        capture_output=True, text=True
+    )
+    assert result.returncode != 0, "Should fail when no --trace or -s/-d given"
