@@ -262,6 +262,60 @@ def is_log_entry_end(line):
     return stripped.split('|')[-1].strip().isdigit()
 
 
+_DATE_SUFFIX_RE = re.compile(r'[._-]\d{4}\d*.*$')
+_EXT_RE         = re.compile(r'\.[a-zA-Z]+$')
+
+
+def _extract_trace_prefix(glob_pattern: str) -> str:
+    """Derive a section-header name from a glob pattern.
+
+    Expands the glob, strips .gz, date/version suffixes, and file extensions
+    from each matched basename, then returns the longest common prefix with
+    trailing digits and separators removed.
+    Falls back to pattern-based extraction when no files match.
+    """
+    files = sorted(glob.glob(glob_pattern))
+    if not files:
+        name = os.path.basename(glob_pattern.rstrip('*?'))
+        if name.endswith('.gz'):
+            name = name[:-3]
+        name = _DATE_SUFFIX_RE.sub('', name)
+        name = _EXT_RE.sub('', name)
+        return re.sub(r'[-_.\d]+$', '', name) or 'trace'
+
+    names = []
+    for f in files:
+        n = os.path.basename(f)
+        if n.endswith('.gz'):
+            n = n[:-3]
+        n = _DATE_SUFFIX_RE.sub('', n)
+        n = _EXT_RE.sub('', n)
+        if n:
+            names.append(n)
+
+    if not names:
+        return 'trace'
+
+    if len(names) == 1:
+        # Single file: strip only trailing non-alphanumeric separators, not digits
+        return re.sub(r'[-_.]+$', '', names[0]) or names[0]
+
+    prefix = os.path.commonprefix(names)
+    prefix = re.sub(r'[-_.\d]+$', '', prefix)
+    return prefix or names[0]
+
+
+def _is_summary_trace(pattern: str) -> bool:
+    """Return True if the glob pattern / path refers to a SummaryTrace file."""
+    return os.path.basename(pattern).lower().startswith('summarytrace')
+
+
+def _is_detail_trace(pattern: str) -> bool:
+    """Return True if the glob pattern / path refers to a DetailedTrace or DetailTrace file."""
+    name = os.path.basename(pattern).lower()
+    return name.startswith('detailtrace') or name.startswith('detailedtrace')
+
+
 def process_simple_search(file_pattern, fsmid, section_name, out_handle):
     """Search for FSMId in files (case-insensitive)."""
     out_handle.write(f"{'='*20} SECTION: {section_name} {'='*20}\n")

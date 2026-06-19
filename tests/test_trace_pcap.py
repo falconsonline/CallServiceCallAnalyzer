@@ -664,3 +664,54 @@ def test_detect_our_ips_majority_vote_across_dialogs():
     our_ips = _detect_our_ips(detail_records, flow_records)
     assert '10.0.0.2' in our_ips
     assert '10.0.0.1' not in our_ips
+
+
+from extract_callservice_logs import _extract_trace_prefix, _is_summary_trace, _is_detail_trace
+
+
+def test_extract_trace_prefix_strips_date_suffix(tmp_path):
+    f = tmp_path / "appfulltrace2.20260603-162248.log"
+    f.write_text("line\n")
+    result = _extract_trace_prefix(str(tmp_path / "appfulltrace2*"))
+    assert result == "appfulltrace2"
+
+
+def test_extract_trace_prefix_strips_csv_extension(tmp_path):
+    f = tmp_path / "appevent.csv"
+    f.write_text("line\n")
+    result = _extract_trace_prefix(str(tmp_path / "appevent*"))
+    assert result == "appevent"
+
+
+def test_extract_trace_prefix_common_prefix_strips_trailing_digit(tmp_path):
+    (tmp_path / "app-trace1.log").write_text("a\n")
+    (tmp_path / "app-trace2.log").write_text("b\n")
+    result = _extract_trace_prefix(str(tmp_path / "app-trace*"))
+    assert result == "app-trace"
+
+
+def test_extract_trace_prefix_common_prefix_mixed_separators(tmp_path):
+    (tmp_path / "app-trace1.log").write_text("a\n")
+    (tmp_path / "app-trace-02.log").write_text("b\n")
+    result = _extract_trace_prefix(str(tmp_path / "app-trace*"))
+    assert result == "app-trace"
+
+
+def test_is_summary_trace_true():
+    assert _is_summary_trace("applogs/SummaryTrace.20260101.log") is True
+    assert _is_summary_trace("SummaryTrace*") is True
+
+
+def test_is_summary_trace_false():
+    assert _is_summary_trace("DetailTrace*") is False
+    assert _is_summary_trace("applog*") is False
+
+
+def test_is_detail_trace_true():
+    assert _is_detail_trace("applogs/DetailTrace.20260101.log") is True
+    assert _is_detail_trace("DetailedTrace*") is True
+
+
+def test_is_detail_trace_false():
+    assert _is_detail_trace("SummaryTrace*") is False
+    assert _is_detail_trace("applog*") is False
