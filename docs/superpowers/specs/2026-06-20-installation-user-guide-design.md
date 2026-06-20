@@ -38,9 +38,9 @@ Neither file exists today. Both will be created from scratch.
 ## `docs/user-guide.md` — Sections
 
 ### 1. Overview
-- What problem the tool solves: given a single FSMId, gather every relevant log line and network packet across multiple log sources
-- The two scripts and how they relate: `extract-callservice-logs.py` is the main orchestrator; `hexlog2pcap.py` is a standalone hex-to-PCAP converter also used internally
-- Typical use case narrative: engineer has a reported call failure, needs to correlate SummaryTrace, DetailTrace, CallService main log, TcapServer logs, and PCAP captures in one step
+- What problem the tool solves: given a single FSMId, gather every relevant log line and network packet across multiple log sources for any SDS7-based application (CallService, iCampaign, WSMS, etc.)
+- The two scripts and how they relate: `extract-sds7-logs.py` is the main orchestrator; `hexlog2pcap.py` is a standalone hex-to-PCAP converter also used internally
+- Typical use case narrative: engineer has a reported call or campaign failure, needs to correlate SummaryTrace, DetailTrace, application main logs, TcapServer logs, and PCAP captures in one step
 
 ### 2. Prerequisites
 
@@ -71,7 +71,9 @@ A brief plain-English glossary of terms a new user needs before running the tool
 | SPC (Signalling Point Code) | Network address of a signalling node; shown in MTP3 routing and in the HTML diagram |
 | SummaryTrace log | High-level per-call event log; file names match `SummaryTrace*` |
 | DetailTrace log | Detailed per-call protocol log; file names match `DetailTrace*` or `DetailedTrace*` |
-| Main CallService log | Thread-based application log; file names match `callservice-*` |
+| WSMSTrace log | WSMS application trace log; file names match `WSMSTrace*` |
+| CampaignTrace log | iCampaign application trace log; file names match `CampaignTrace*` |
+| Main application log | Thread-based application log; file names match `callservice-*`, `applog*`, etc. |
 | TcapServer log | SS7 TCAP layer log; file names match `TcapServer-0*` |
 | TcapServerEvent log | TCAP event log (optional); file names match `TcapServerEvent*` |
 | PCAP | Network packet capture file (`.pcap` / `.pcap.gz`) containing raw Sigtran traffic |
@@ -80,21 +82,21 @@ A brief plain-English glossary of terms a new user needs before running the tool
 ### 4. Task: Extract logs for a call
 
 **What you need:**
-- SummaryTrace and/or DetailTrace log files
-- FSMId of the call to extract
-- (Optional) Main CallService log files
+- One or more trace log files (SummaryTrace, DetailTrace, WSMSTrace, CampaignTrace, or other applog)
+- FSMId of the call/session to extract
+- (Optional) Main application log files
 
 **Minimal command:**
 ```bash
-python3 extract-callservice-logs.py \
+python3 extract-sds7-logs.py \
   -f "applogs/SummaryTrace*" \
   -f "applogs/DetailTrace*" \
   -i <FSMId>
 ```
 
-**With CallService main log:**
+**With application main log:**
 ```bash
-python3 extract-callservice-logs.py \
+python3 extract-sds7-logs.py \
   -f "applogs/SummaryTrace*" \
   -f "applogs/DetailTrace*" \
   -m "applogs/callservice-*" \
@@ -102,10 +104,20 @@ python3 extract-callservice-logs.py \
   -n "TestCaseName"
 ```
 
+**Additional trace types (iCampaign / WSMS):**
+```bash
+python3 extract-sds7-logs.py \
+  -f "applogs/SummaryTrace*" \
+  -f "wsmstrace/WSMSTrace*" \
+  -f "campaigntrace/CampaignTrace*" \
+  -m "applogs/applog*" \
+  -i <FSMId>
+```
+
 **Flags used:**
-- `-f` / `--trace` — glob pattern for a trace file group (repeatable; auto-detects SummaryTrace vs DetailTrace by filename)
+- `-f` / `--trace` — glob pattern for a trace file group (repeatable; auto-detects SummaryTrace vs DetailTrace by filename; supports any trace type)
 - `-i` / `--id` — FSMId to extract (mandatory)
-- `-m` / `--main` — glob for main CallService log files (optional)
+- `-m` / `--main` — glob for main application log files (optional)
 - `-n` / `--testcase` — prefix for output filenames (optional)
 - `-v` / `--debug` — verbose logging (optional)
 
@@ -126,7 +138,7 @@ date +"%z"
 
 **Command:**
 ```bash
-python3 extract-callservice-logs.py \
+python3 extract-sds7-logs.py \
   -f "applogs/SummaryTrace*" \
   -f "applogs/DetailTrace*" \
   -m "applogs/callservice-*" \
@@ -149,7 +161,7 @@ python3 extract-callservice-logs.py \
 
 **Command:**
 ```bash
-python3 extract-callservice-logs.py \
+python3 extract-sds7-logs.py \
   -f "applogs/SummaryTrace*" \
   -f "applogs/DetailTrace*" \
   -m "applogs/callservice-*" \
@@ -162,12 +174,12 @@ python3 extract-callservice-logs.py \
 ```
 
 **Additional flags:**
-- `-t` / `--tcap` — glob for TcapServer log files; mandatory when `--html` is used
+- `-t` / `--tcap` — glob for TcapServer log files; mandatory when `--html` is used; covers SDS-based apps (CallService, iCampaign, WSMS)
 - `-te` / `--tcap-event` — glob for TcapServerEvent log files (optional)
 - `--html` — generate the HTML sequence diagram
 
 **What the diagram shows:**
-- Participants: Remote Entity (SSP/HLR/VLR) → SmartSTP signode(s) → TcapServer instance(s) → CallService instance(s)
+- Participants: Remote Entity (SSP/HLR/VLR) → SmartSTP signode(s) → TcapServer instance(s) → SDS application instance(s) (CallService / iCampaign / WSMS)
 - Each arrow is one TCAP/CAMEL/MAP message with direction, message type, and TID
 - SPC labels on participant headers (not repeated per arrow)
 - Dark/light mode toggle; snapshot-copy button
@@ -222,13 +234,13 @@ python3 hexlog2pcap.py --list
 |---|---|---|
 | `<name>_SummaryTrace.txt` | Always | Extracted SummaryTrace lines for the FSMId |
 | `<name>_DetailTrace.txt` | Always | Extracted DetailTrace lines for the FSMId |
-| `<name>_callservice.txt` | When `-m` given | Extracted main CallService thread blocks |
+| `<name>_main.txt` | When `-m` given | Extracted main application thread blocks (CallService / iCampaign / WSMS) |
 | `<name>_TcapServer.txt` | When `-t` given | Extracted TcapServer thread blocks by TID |
 | `<name>_tcap.pcap` | When `-t` given | PCAP from TcapServer DK hex dumps, filtered by TID |
 | `<name>_sigtran.pcap` | When `-p` given | Filtered real PCAP captures by TCAP TID |
 | `<name>.html` | When `--html` given | Self-contained HTML mermaid sequence diagram |
 
-### 10. CLI reference — `extract-callservice-logs.py`
+### 10. CLI reference — `extract-sds7-logs.py`
 
 Complete flag table with type, mandatory/optional, and description. All flags, including deprecated `-s`/`-d` aliases.
 
