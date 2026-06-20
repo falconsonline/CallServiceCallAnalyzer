@@ -75,12 +75,20 @@ Register custom parsers/decoders with `register_parser()` / `register_decoder()`
 
 Key functions and their roles:
 
+**Trace routing helpers** (invoked in `main()` to route `-f` patterns)
+
+| Function | Role |
+|---|---|
+| `_is_summary_trace(pattern)` | Returns True if the glob basename starts with `summarytrace` or `summary-`; used to auto-route `-f` patterns to PCAP correlation |
+| `_is_detail_trace(pattern)` | Returns True if the glob basename starts with `detailtrace` or `detailedtrace` |
+| `_extract_trace_prefix(glob_pattern)` | Strips date/version suffixes from matched filenames to derive a clean section header (e.g. `SummaryTrace`) |
+
 **Trace extraction**
 
 | Function | Role |
 |---|---|
 | `process_simple_search()` | Greps a trace file group (SummaryTrace, DetailTrace, WSMSTrace, etc.) for an FSMId; writes one output section per call |
-| `parse_detail_trace_records()` | Parses DetailTrace lines into structured records for HTML diagram and PCAP correlation |
+| `parse_detail_trace_records()` | Parses DetailTrace lines into structured records used by PCAP correlation and HTML diagram |
 | `discover_correlated_fsmids()` | Finds forwarded FSMIds via DNISCallsMap FTN entries in the main log; returns correlated + cleanup FSMId lists |
 
 **Main log extraction**
@@ -93,7 +101,9 @@ Key functions and their roles:
 
 | Function | Role |
 |---|---|
-| `process_tcap_logs()` | TcapServer thread-block extraction; 2-phase: hex TID match → dialog ID expansion (3 rounds) |
+| `process_tcap_logs()` | TcapServer thread-block extraction; 2-phase: hex TID match → dialog ID expansion (3 rounds); Phase 3 uses timestamp matching via `_extract_pcap_timestamps` + `_find_hex_dump_threads` |
+| `_extract_pcap_timestamps()` | Gets per-packet timestamps from TcapServer PCAP for TID-matched packets (feeds Phase 3) |
+| `_find_hex_dump_threads()` | Identifies TcapServer log threads whose hex dumps match PCAP timestamps (Phase 3 thread resolution) |
 | `process_tcap_pcap()` | Converts TcapServer DK hex dumps to PCAP via `hexlog2pcap.convert()` then filters by TID |
 | `process_tcap_events()` | Extracts TcapServerEvent log entries matching TID search terms |
 | `extract_tids()` | Scans extracted log output for 8-hex-char TCAP TIDs using `TID_RE` |
@@ -103,10 +113,23 @@ Key functions and their roles:
 
 | Function | Role |
 |---|---|
-| `process_pcap()` | Filters real PCAP captures: per-file tshark → merge → dechunk SCTP → re-filter by TID |
-| `process_pcap_from_traces()` | Alternate PCAP extraction path using SummaryTrace/DetailTrace SCCP fields and timestamps when no main log is available |
-| `build_trace_based_filter()` | Builds tshark display filter from SummaryTrace SCCP fields + DetailTrace timestamp window |
-| `dechunk_sctp_stream()` | Splits SCTP frames containing multiple DATA chunks into one-frame-per-chunk using scapy |
+| `process_pcap()` | Main-log path: per-file tshark filter by TID → merge → dechunk SCTP → re-filter |
+| `process_pcap_from_traces()` | Trace-only path (no `-m`): uses SummaryTrace/DetailTrace SCCP fields + timestamp window to filter PCAP |
+| `parse_summary_trace_fields()` | Extracts SCCP CgPA/CdPA and timestamps from SummaryTrace records for the trace-based filter |
+| `parse_detail_trace_sccp_fields()` | Extracts SCCP fields from DetailTrace records for the trace-based filter |
+| `_detail_trace_epoch_window()` | Computes epoch timestamp window (first/last event) from DetailTrace records |
+| `build_trace_based_filter()` | Assembles tshark display filter from SCCP fields + timestamp window |
+| `build_tshark_filter()` | Builds tshark display filter from TID list + optional timestamp bounds |
+| `dechunk_sctp_stream()` | Splits SCTP frames carrying multiple DATA chunks into one-frame-per-chunk using scapy |
+
+**BCD / protocol decode helpers** (used to enrich HTML diagram and flow records)
+
+| Function | Role |
+|---|---|
+| `_decode_bcd_gt()` | Decodes a BCD-packed GT address from a 7-byte hex string (skips leading TOA byte) |
+| `_find_bcsm_types_in_hex()` | Extracts distinct BCSM event type integers from a CAMEL RRBCSM payload hex string |
+| `_find_msisdn_from_hex()` | Decodes subscriber MSISDN from a MAP SendParameters response hex payload |
+| `_find_ftns_from_hex()` | Decodes all ForwardedToNumber GT addresses from a MAP ISD hex payload |
 
 **HTML sequence diagram**
 
@@ -115,18 +138,21 @@ Key functions and their roles:
 | `generate_transaction_html()` | Builds mermaid sequence diagram HTML; uses Union-Find to group TID pairs into transactions |
 | `_enrich_flow_records_from_pcap()` | Queries PCAP with tshark field extraction to add msg_type, CgPA, CdPA to flow records |
 | `_detect_our_ips()` | Auto-detects local signode IP addresses from PCAP frames by vote-counting; overridden by `--signode` |
+| `_parse_signode_ips()` | Parses `--signode NAME:IP1,IP2` args into `{ip: node_name}` map used for diagram direction |
 
 ### Log Format Assumptions
 
 - Main application logs (CallService, iCampaign, WSMS): pipe-delimited (`|`) with thread name in field matching `Thread-\d+` or `Rule Executor \d+`, FSMId in field 5 before the first colon
-- TcapServer logs: pipe-delimited with 8-hex-char thread ID in field 4; blocks delimited by "Received from n/w" / "Received from App" / "Sending to n/w" / "Sending to App" lines
+- TcapServer logs: pipe-delimited with 8-hex-char thread ID in field 4; blocks delimited by "Received from n/w" / "Received from App" / "Sending Message to network" / "Sending Message to App" lines
 - Trace logs (SummaryTrace, DetailTrace, WSMSTrace, CampaignTrace): grepped directly for FSMId; section header derived from filename prefix via `_extract_trace_prefix()`
 - Input files may be `.gz` compressed; `open_file()` handles both
 
 ## Directory Layout
 
 ```
-applogs/        # Input log files (gitignored) - SummaryTrace, DetailTrace, callservice, TcapServer logs
+applogs/        # SummaryTrace*, DetailTrace*, callservice-*/applog*, TcapServer-0*, TcapServerEvent* (gitignored)
+campaigntrace/  # CampaignTrace* — iCampaign trace logs (gitignored)
+wsmstrace/      # WSMSTrace* — WSMS trace logs (gitignored)
 pcaps/          # Input PCAP captures (gitignored)
 logs/           # Output directory (gitignored) - extracted .txt, .pcap, .html files
 old/            # Old script versions (gitignored)
