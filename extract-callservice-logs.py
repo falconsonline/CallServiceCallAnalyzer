@@ -1,3 +1,8 @@
+# DEPRECATED — use extract-sds7-logs.py instead.
+# This script is no longer maintained. extract-sds7-logs.py is the current
+# version with the same CLI flags plus support for iCampaign, WSMS, and
+# trace-based PCAP extraction without a main log.
+
 import argparse
 import glob
 import gzip
@@ -3664,4 +3669,9 @@ def main():
 
 
 if __name__ == "__main__":
+    print(
+        "\nWARNING: extract-callservice-logs.py is deprecated.\n"
+        "Use extract-sds7-logs.py instead — same flags, actively maintained.\n",
+        file=sys.stderr,
+    )
     main()
