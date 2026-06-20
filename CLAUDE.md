@@ -16,12 +16,13 @@ Extracts and correlates telecom call logs for a specific call identified by its 
 
 ```bash
 # Typical invocation (from repo root, with input logs in applogs/)
-python3 extract-callservice-logs.py \
-  -s "applogs/SummaryTrace*" \
-  -d "applogs/DetailTrace*" \
+python3 extract-sds7-logs.py \
+  -f "applogs/SummaryTrace*" \
+  -f "applogs/DetailTrace*" \
   -m "applogs/callservice-*" \
   -i <FSMId> \
   -p "pcaps/stp*.pcap*" \
+  -z "+0000" \
   -t "applogs/TcapServer-0*" \
   -te "applogs/TcapServerEvent*" \
   -n "TestCaseName" \
@@ -43,7 +44,7 @@ python3 hexlog2pcap.py --list
 
 ```bash
 python3 -m py_compile hexlog2pcap.py
-python3 -m py_compile extract-callservice-logs.py
+python3 -m py_compile extract-sds7-logs.py
 ```
 
 ## External Dependencies
@@ -69,7 +70,7 @@ Plugin-style pipeline: `LogParser → ProtocolDecoder → PcapBackend`
 
 Register custom parsers/decoders with `register_parser()` / `register_decoder()`, then call `hexlog2pcap.convert(infile, outfile, parser="name", decoder="name")`.
 
-### `extract-callservice-logs.py` — Main Extraction Orchestrator
+### `extract-sds7-logs.py` — Main Extraction Orchestrator
 
 Key functions and their roles:
 
@@ -83,6 +84,7 @@ Key functions and their roles:
 | `generate_transaction_html()` | Builds mermaid sequence diagram HTML; uses Union-Find to group TID pairs into transactions |
 | `_enrich_flow_records_from_pcap()` | Queries PCAP with tshark field extraction to add msg_type, CgPA, CdPA to flow records |
 | `extract_tids()` | Scans extracted log output for 8-hex-char TCAP TIDs using `TID_RE` |
+| `discover_correlated_fsmids()` | Finds forwarded FSMIds via DNISCallsMap FTN entries in the main log |
 
 ### Log Format Assumptions
 
@@ -104,5 +106,6 @@ docs/           # Feature documentation
 
 | Document | Topic |
 |---|---|
+| [`docs/user-guide.md`](docs/user-guide.md) | Installation and user guide — prerequisites, all workflows, CLI reference, troubleshooting, glossary |
 | [`docs/html-sequence-diagram.md`](docs/html-sequence-diagram.md) | HTML sequence diagram — node chain, SPC labels, SCCP fields, anomaly detection, tshark field list, dark/light mode, snapshot copy |
 | [`docs/tcapserver-handling.md`](docs/tcapserver-handling.md) | TcapServer block extraction — log format, TID seed/dialog expansion, block classification, flow_record schema, anomaly types, PCAP enrichment, output structure |
