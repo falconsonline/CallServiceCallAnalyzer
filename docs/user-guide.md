@@ -83,13 +83,26 @@ If `tshark` is installed but not on PATH (common on macOS), the tool searches `/
 
 ### Directory layout
 
-The tool expects input files under a directory reachable via glob patterns. The recommended layout:
+The tool expects input files under directories reachable via glob patterns. Typical layouts:
 
+**CallService:**
 ```
-applogs/        # SummaryTrace*, DetailTrace*, callservice-*, TcapServer-0*, etc.
+applogs/        # SummaryTrace*, DetailTrace*, callservice-*, TcapServer-0*, TcapServerEvent*
 pcaps/          # *.pcap, *.pcap.gz — real Sigtran captures
 logs/           # Output directory (created automatically)
 ```
+
+**iCampaign / WSMS:**
+```
+applogs/        # SummaryTrace*, TcapServer-0*, TcapServerEvent*
+campaigntrace/  # CampaignTrace*
+wsmstrace/      # WSMSTrace*
+applogs/        # applog* (main application log)
+pcaps/          # *.pcap, *.pcap.gz
+logs/           # Output directory (created automatically)
+```
+
+File locations vary by deployment — use the glob patterns (`-f`, `-m`, `-t`) to point at wherever the files actually are.
 
 ---
 
@@ -150,8 +163,8 @@ python3 extract-sds7-logs.py \
 ```bash
 python3 extract-sds7-logs.py \
   -f "applogs/SummaryTrace*" \
-  -f "applogs/WSMSTrace*" \
-  -f "applogs/CampaignTrace*" \
+  -f "wsmstrace/WSMSTrace*" \
+  -f "campaigntrace/CampaignTrace*" \
   -m "applogs/applog*" \
   -i 2e277b400013022
 ```
@@ -195,11 +208,16 @@ indicates correlated extraction is active.
 
 Use this when you have raw Sigtran PCAP captures and want to isolate the packets for one call.
 
-The tool:
-1. Runs the log extraction (as in §4) to discover TCAP TIDs for the call
-2. Filters all PCAP files matching the `-p` pattern by those TIDs
-3. Dechunks SCTP frames carrying multiple DATA chunks
-4. Writes the filtered result to a single output PCAP
+The tool discovers TCAP TIDs for the call then filters the PCAP by those TIDs. It supports two paths depending on what logs you have:
+
+**With main application log (`-m`):** TIDs are extracted from the main log output, then used to filter the PCAP.
+
+**Trace-only (no `-m`):** If SummaryTrace and DetailTrace are provided (via `-f`), the tool builds a tshark filter from the SCCP Called/Calling Party Addresses and timestamp window found in those traces — no main log required.
+
+Both paths:
+1. Filter all PCAP files matching `-p` by the discovered criteria
+2. Dechunk SCTP frames carrying multiple DATA chunks
+3. Write the filtered result to a single output PCAP
 
 ### Additional requirement
 
@@ -280,6 +298,7 @@ Remote Entity  →  signode(s)  →  TcapServer instance(s)  →  SDS app instan
 - Only participants that appear in the extracted logs are shown
 - Each arrow represents one TCAP/CAMEL/MAP message
 - SPC (Signalling Point Code) is shown once per participant label, not repeated per arrow
+- SDS app instance labels (e.g. `Call-02`, `WSMS-01`) are derived from `instance:#…#` fields in the TcapServer log
 - **Dark/light mode toggle** — button in the top-right corner
 - **Snapshot copy** — copies a rendered PNG of the current view to the clipboard
 
