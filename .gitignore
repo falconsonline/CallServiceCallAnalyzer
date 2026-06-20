@@ -6,3 +6,15 @@ smart-stp*
 __pycache__/
 *.pyc
 .claude/
+*.log
+*.pcap
+*.pcap1
+*.xls
+*.xlsx
+*.gz
+plug*.xml
+summary-2faef6800036a98-2faef6800036a9a.txt
+det*-2faef6800036a98-2faef6800036a9a.txt
+Ecu_log.txt
+campaigntrace.txt
+callservice-02.20260616-121.tar

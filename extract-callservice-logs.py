@@ -31,8 +31,8 @@ TID_RE = re.compile(r'(?:otid|dtid)\s*[=\[]\s*([0-9a-fA-F]{8})', re.IGNORECASE)
 _TCAP_NW_RE      = re.compile(r'Received from n/w', re.IGNORECASE)
 _TCAP_APP_RE     = re.compile(r'Received from App', re.IGNORECASE)
 _TCAP_READY_RE   = re.compile(r'ProcessMessage RWTcap Decode Successful', re.IGNORECASE)
-_TCAP_SEND_NW_RE = re.compile(r'Sending to n/w', re.IGNORECASE)
-_TCAP_SEND_APP_RE= re.compile(r'Sending to App', re.IGNORECASE)
+_TCAP_SEND_NW_RE = re.compile(r'Sending (?:Message to network|to n/w)', re.IGNORECASE)
+_TCAP_SEND_APP_RE= re.compile(r'Sending (?:Message to App|to App)', re.IGNORECASE)
 _TCAP_HEX_RE     = re.compile(r'^[\s0-9a-fA-F]+$')
 _TCAP_DIALOG_RE  = re.compile(r'Dialog\s*\[(\d+)')
 _TCAP_THREAD_ID_RE  = re.compile(r'^[0-9A-Fa-f]{8}$')
@@ -95,8 +95,13 @@ MONITOR_MODE_MAP: dict = {
 }
 
 # ── CallService log patterns for subscriber numbers ─────────────────────────
-_CS_CALL_RE    = re.compile(r'Received call from \[([^\]]+)\] to \[([^\]]+)\]')
-_CS_CONNECT_RE = re.compile(r'(?:SENDING CONNECT,\s*ON|Sending Connect on MSRN)=(\S+)')
+_CS_CALL_RE      = re.compile(r'Received call from \[([^\]]+)\] to \[([^\]]+)\]')
+_CS_CALL_IMSI_RE = re.compile(
+    r'Received call from \[([^\]]+)\] to \[([^\]]+)\] with IMSI \[([^\]]*)\]')
+_CS_DNIS_RE      = re.compile(
+    r'Created DNISCallsMap entry for imsi\[([^\]]*)\],'
+    r'\s*busy\[([^\]]*)\],\s*NoReply\[([^\]]*)\],\s*NotReachable\[([^\]]*)\]')
+_CS_CONNECT_RE   = re.compile(r'(?:SENDING CONNECT,\s*ON|Sending Connect on MSRN)=(\S+)')
 
 
 def _sanitize_label(text: str) -> str:
@@ -121,6 +126,61 @@ def _decode_int(val: str, base: int = 10):
         return int(v, base)
     except ValueError:
         return None
+
+
+# ── Hex-decode helpers for CAMEL/MAP application parameters ─────────────────
+_RRBCSM_BCSM_RE = re.compile(r'(?i)8001([0-9a-f]{2})8101')  # RRBCSM eventTypeBCSM
+_MAP_MSISDN_RE  = re.compile(r'(?i)8107([0-9a-f]{14})')      # MSISDN 7-byte GT
+_MAP_FTN_RE     = re.compile(r'(?i)8507([0-9a-f]{14})')      # ForwardedToNumber GT
+
+
+def _decode_bcd_gt(hex_7bytes: str) -> str:
+    """Decode a BCD-packed GT address from hex, skipping the leading TOA byte."""
+    digits = []
+    for i in range(2, len(hex_7bytes), 2):
+        try:
+            b = int(hex_7bytes[i:i + 2], 16)
+        except ValueError:
+            break
+        lo = b & 0x0F
+        hi = (b >> 4) & 0x0F
+        if lo <= 9:
+            digits.append(str(lo))
+        if hi <= 9:   # 0xF nibble = filler → stop
+            digits.append(str(hi))
+        else:
+            break
+    return ''.join(digits)
+
+
+def _find_bcsm_types_in_hex(hex_str: str) -> list:
+    """Return list of distinct BCSM event type ints from a CAMEL RRBCSM payload."""
+    seen: set = set()
+    result: list = []
+    for m in _RRBCSM_BCSM_RE.finditer(hex_str):
+        v = int(m.group(1), 16)
+        if v not in seen:
+            seen.add(v)
+            result.append(v)
+    return result
+
+
+def _find_msisdn_from_hex(hex_str: str) -> str:
+    """Decode subscriber MSISDN from a MAP SendParameters response hex payload."""
+    m = _MAP_MSISDN_RE.search(hex_str)
+    return _decode_bcd_gt(m.group(1)) if m else ''
+
+
+def _find_ftns_from_hex(hex_str: str) -> list:
+    """Decode all ForwardedToNumber GT addresses from a MAP ISD hex payload."""
+    seen: set = set()
+    result: list = []
+    for m in _MAP_FTN_RE.finditer(hex_str):
+        n = _decode_bcd_gt(m.group(1))
+        if n and n not in seen:
+            seen.add(n)
+            result.append(n)
+    return result
 
 
 def _get_tool(name):
@@ -307,13 +367,192 @@ def _extract_trace_prefix(glob_pattern: str) -> str:
 
 def _is_summary_trace(pattern: str) -> bool:
     """Return True if the glob pattern / path refers to a SummaryTrace file."""
-    return os.path.basename(pattern).lower().startswith('summarytrace')
+    name = os.path.basename(pattern).lower()
+    return name.startswith('summarytrace') or name.startswith('summary-')
 
 
 def _is_detail_trace(pattern: str) -> bool:
     """Return True if the glob pattern / path refers to a DetailedTrace or DetailTrace file."""
     name = os.path.basename(pattern).lower()
-    return name.startswith('detailtrace') or name.startswith('detailedtrace')
+    return (name.startswith('detailtrace') or name.startswith('detailedtrace')
+            or name.startswith('detailed-'))
+
+
+def discover_correlated_fsmids(main_glob, primary_fsmid,
+                               summary_patterns, detail_glob):
+    """Find forwarded-leg FSMIds via DNISCallsMap (busy/NoReply/NotReachable FTNs).
+
+    Returns:
+        correlated : list of str  — secondary FSMIds (may be empty)
+        meta       : dict with keys a_number, b_number, imsi, busy, no_reply,
+                     not_reachable, fwd_fsmids {fsmid: (ftn, reason)}
+    """
+    meta = {
+        'a_number': '', 'b_number': '', 'imsi': '',
+        'busy': '', 'no_reply': '', 'not_reachable': '',
+        'fwd_fsmids': {},
+        'cleanup_fsmids': [],
+    }
+    if not (main_glob and summary_patterns and detail_glob):
+        return [], meta
+
+    primary_lower = primary_fsmid.lower()
+
+    # ── Step 1a: extract A#, IMSI from "Received call from" line for primary FSMId ──
+    # These lines carry "FSMId: message" format in field 5.
+    for fpath in get_files(main_glob):
+        try:
+            with open_file(fpath) as f:
+                for line in f:
+                    if primary_lower not in line.lower():
+                        continue
+                    if line_fsmid(line) != primary_lower:
+                        continue
+                    parts = line.split('|')
+                    msg = parts[4][parts[4].find(':')+1:].strip() if len(parts) >= 5 else ''
+                    m = _CS_CALL_IMSI_RE.search(msg)
+                    if m:
+                        meta['a_number'] = m.group(1).strip()
+                        meta['b_number'] = m.group(2).strip()
+                        meta['imsi']     = m.group(3).strip()
+                        break
+        except (IOError, OSError):
+            continue
+        if meta['a_number']:
+            break
+
+    # ── Step 1b: find DNISCallsMap entry by IMSI (not tagged with FSMId prefix) ──
+    if meta['imsi']:
+        for fpath in get_files(main_glob):
+            try:
+                with open_file(fpath) as f:
+                    for line in f:
+                        m2 = _CS_DNIS_RE.search(line)
+                        if m2 and m2.group(1).strip() == meta['imsi']:
+                            meta['busy']          = m2.group(2).strip()
+                            meta['no_reply']      = m2.group(3).strip()
+                            meta['not_reachable'] = m2.group(4).strip()
+                            break
+            except (IOError, OSError):
+                continue
+            if meta['busy']:
+                break
+
+    if not meta['a_number'] or not meta['busy']:
+        return [], meta
+
+    ftn_reasons = {ftn: reason
+                   for ftn, reason in [
+                       (meta['busy'],          'busy'),
+                       (meta['no_reply'],       'no_reply'),
+                       (meta['not_reachable'],  'not_reachable'),
+                   ] if ftn}
+    logging.info("Correlation search: A#=%s IMSI=%s busy=%s noreply=%s notreachable=%s",
+                 meta['a_number'], meta['imsi'],
+                 meta['busy'], meta['no_reply'], meta['not_reachable'])
+
+    # ── Step 2: determine DetailedTrace time range for primary FSMId ──────────
+    start_ts_f = end_ts_f = None
+    detail_pats = detail_glob if isinstance(detail_glob, list) else [detail_glob]
+    for dpat in detail_pats:
+        for fpath in get_files(dpat):
+            try:
+                with open_file(fpath) as f:
+                    for line in f:
+                        if primary_lower not in line.lower():
+                            continue
+                        pts = line.rstrip('\n').split(',')
+                        if len(pts) < 2:
+                            continue
+                        try:
+                            _, tp = pts[0].strip().split(' ', 1)
+                            hh, mm, ss = tp.split(':')
+                            ts_f = int(hh)*3600 + int(mm)*60 + int(ss) + int(pts[1].strip())/1000.0
+                        except (ValueError, IndexError):
+                            continue
+                        if start_ts_f is None:
+                            start_ts_f = ts_f
+                        end_ts_f = ts_f
+            except (IOError, OSError):
+                continue
+
+    if start_ts_f is None:
+        logging.info("Correlation search: no DetailedTrace entries for primary FSMId; skipping")
+        return [], meta
+
+    logging.info("Correlation search: DetailedTrace window %.3f – %.3f s from midnight",
+                 start_ts_f, end_ts_f)
+
+    # ── Step 3: scan SummaryTrace for matching secondary FSMId(s) ─────────────
+    correlated: list = []
+    seen = {primary_lower}
+    spats = summary_patterns if isinstance(summary_patterns, list) else [summary_patterns]
+    for spat in spats:
+        for fpath in get_files(spat):
+            try:
+                with open_file(fpath) as f:
+                    for line in f:
+                        pts = line.rstrip('\n').split(',')
+                        if len(pts) < 21:
+                            continue
+                        try:
+                            _, tp = pts[0].strip().split(' ', 1)
+                            hh, mm, ss = tp.split(':')
+                            ts_f = (int(hh)*3600 + int(mm)*60 + int(ss)
+                                    + int(pts[1].strip())/1000.0)
+                        except (ValueError, IndexError):
+                            continue
+                        if ts_f < start_ts_f or ts_f > end_ts_f:
+                            continue
+                        a_f   = pts[13].strip() if len(pts) > 13 else ''
+                        b_f   = pts[20].strip() if len(pts) > 20 else ''
+                        cfsmid = pts[5].strip()  if len(pts) > 5  else ''
+                        if (a_f == meta['a_number'] and b_f in ftn_reasons
+                                and cfsmid.lower() not in seen):
+                            seen.add(cfsmid.lower())
+                            correlated.append(cfsmid)
+                            meta['fwd_fsmids'][cfsmid] = (b_f, ftn_reasons[b_f])
+                            reason = ftn_reasons[b_f]
+                            logging.info("[*] Correlated FSMId: %s  A#=%s FTN=%s reason=%s",
+                                         cfsmid, meta['a_number'], b_f, reason)
+                            print(f"[*] Correlated FSMId found: {cfsmid}  "
+                                  f"(A#={meta['a_number']} → FTN {b_f} [{reason}])")
+            except (IOError, OSError) as e:
+                logging.warning("SummaryTrace scan error %s: %s", fpath, e)
+
+    # ── Step 4: scan callservice log for cleanup FSMId (RESTORE-ISD-SENT-FROM-CLEANUPRULE) ──
+    # These are ISD restore operations triggered when the VMCC call ends; logged within
+    # the same second as the primary FSMId's StateMachineClosed event.
+    ts_lo = start_ts_f - 5.0
+    ts_hi = end_ts_f   + 5.0
+    for fpath in get_files(main_glob):
+        try:
+            with open_file(fpath) as f:
+                for line in f:
+                    if 'RESTORE-ISD-SENT-FROM-CLEANUPRULE' not in line:
+                        continue
+                    parts4 = line.split('|', 3)
+                    if len(parts4) < 2:
+                        continue
+                    try:
+                        hh, mm, ss_ms = parts4[1].strip().split(':', 2)
+                        ts_f = int(hh)*3600 + int(mm)*60 + float(ss_ms)
+                    except (ValueError, IndexError):
+                        continue
+                    if not (ts_lo <= ts_f <= ts_hi):
+                        continue
+                    cln_id = line_fsmid(line)
+                    if cln_id and cln_id not in seen:
+                        seen.add(cln_id)
+                        meta['cleanup_fsmids'].append(cln_id)
+                        logging.info("[*] Cleanup FSMId: %s (RESTORE-ISD-SENT-FROM-CLEANUPRULE)",
+                                     cln_id)
+                        print(f"[*] Cleanup FSMId found:  {cln_id}  "
+                              f"(RESTORE-ISD-SENT-FROM-CLEANUPRULE, within 5s of primary)")
+        except (IOError, OSError) as e:
+            logging.warning("Cleanup scan error %s: %s", fpath, e)
+
+    return correlated, meta
 
 
 def process_simple_search(file_pattern, fsmid, section_name, out_handle):
@@ -340,10 +579,24 @@ def process_simple_search(file_pattern, fsmid, section_name, out_handle):
 def parse_detail_trace_records(file_pattern: str, fsmid: str) -> list:
     """Parse DetailedTrace log lines for fsmid into structured records.
 
-    Returns one dict per in/out line used for the HTML sequence diagram.
+    Two-pass: first collect ALL events (not just in/out), then build one dict
+    per in/out TCAP line enriched with parameter context from nearby auxiliary
+    events (ReceivedCallTrigger, ReceivedERB, ActionComplete ConnectTo, etc.).
     """
-    records: list = []
     target_lower = fsmid.lower()
+    all_events: list = []   # (ts_sec_float, ts_str, event_name, parts_list, direction)
+
+    def _p(parts: list, idx: int) -> str:
+        return parts[idx].strip() if len(parts) > idx else ''
+
+    def _ts_sec(ts_base: str, ms_str: str) -> float:
+        try:
+            _, time_part = ts_base.split(' ', 1)
+            hh, mm, ss  = time_part.split(':')
+            return int(hh) * 3600 + int(mm) * 60 + int(ss) + int(ms_str) / 1000.0
+        except (ValueError, IndexError):
+            return 0.0
+
     for file_path in get_files(file_pattern):
         try:
             with open_file(file_path) as f:
@@ -351,43 +604,77 @@ def parse_detail_trace_records(file_pattern: str, fsmid: str) -> list:
                     if target_lower not in line.lower():
                         continue
                     parts = line.rstrip('\n').split(',')
-                    if len(parts) < 10:
+                    if len(parts) < 6:
                         continue
-                    direction = parts[8].strip() if len(parts) > 8 else ''
-                    if direction not in ('in', 'out'):
-                        continue
-                    ts_base = parts[0].strip()
-                    ms      = parts[1].strip()
+                    ts_base = _p(parts, 0)
+                    ms      = _p(parts, 1)
+                    ev_name = _p(parts, 5)
+                    dirn    = _p(parts, 8)
                     try:
                         dt_part, time_part = ts_base.split(' ', 1)
                         d, mo, y = dt_part.split('-')
-                        timestamp = f"{y}-{mo}-{d} {time_part}.{ms}"
+                        ts_str = f"{y}-{mo}-{d} {time_part}.{ms}"
                     except ValueError:
-                        timestamp = f"{ts_base}.{ms}"
-                    records.append({
-                        'source':        'detail',
-                        'timestamp':     timestamp,
-                        'direction':     direction,
-                        'protocol':      parts[9].strip()  if len(parts) > 9  else '',
-                        'opcode':        parts[10].strip() if len(parts) > 10 else '',
-                        'dialog_id':     parts[11].strip() if len(parts) > 11 else '',
-                        'cgpa':          parts[13].strip() if len(parts) > 13 else '',
-                        'cdpa':          parts[14].strip() if len(parts) > 14 else '',
-                        'tcap_msg_type': parts[17].strip() if len(parts) > 17 else '',
-                        'comp_type':     parts[20].strip() if len(parts) > 20 else '',
-                        'remote_entity': parts[29].strip() if len(parts) > 29 else '',
-                        'event_name':    parts[5].strip()  if len(parts) > 5  else '',
-                        'tcap_instance': '',
-                        'cs_instance':   '',
-                        'pcap':          {},
-                        'lines':         [],
-                    })
+                        ts_str = f"{ts_base}.{ms}"
+                    all_events.append((_ts_sec(ts_base, ms), ts_str, ev_name, parts, dirn))
         except (IOError, OSError) as e:
             logging.warning("DetailedTrace parse error %s: %s", file_path, e)
+
+    records: list = []
+    for ev_idx, (ts_f, ts_str, ev_name, parts, dirn) in enumerate(all_events):
+        if dirn not in ('in', 'out'):
+            continue
+        ev_lo = ev_name.lower()
+        rec = {
+            'source':        'detail',
+            'fsmid':         fsmid,
+            'timestamp':     ts_str,
+            'direction':     dirn,
+            'protocol':      _p(parts, 9),
+            'opcode':        _p(parts, 10),
+            'dialog_id':     _p(parts, 11),
+            'cgpa':          _p(parts, 13),
+            'cdpa':          _p(parts, 14),
+            'tcap_msg_type': _p(parts, 17),
+            'comp_type':     _p(parts, 20),
+            'hex_payload':   _p(parts, 25),
+            'remote_entity': _p(parts, 28),   # field 28 = remote entity name
+            'event_name':    ev_name,
+            'tcap_instance': '',
+            'cs_instance':   '',
+            'pcap':          {},
+            'lines':         [],
+        }
+
+        # Scan neighbouring events within ±1 s for context parameters.
+        for ctx_ts, _, ctx_ev, ctx_parts, ctx_dir in all_events:
+            if ctx_dir in ('in', 'out'):
+                continue
+            if abs(ctx_ts - ts_f) > 1.0:
+                continue
+            ctx_lo = ctx_ev.lower()
+
+            if ctx_lo == 'receivedcalltrigger':
+                if 'initialdp' in ev_lo:
+                    rec.setdefault('calling_number', _p(ctx_parts, 8))
+                    rec.setdefault('called_number',  _p(ctx_parts, 9))
+                    rec.setdefault('imsi',           _p(ctx_parts, 10))
+                elif 'sendparameters' in ev_lo and dirn == 'out':
+                    rec.setdefault('imsi', _p(ctx_parts, 10))
+
+            elif ctx_lo == 'receivederb':
+                if 'eventreport' in ev_lo:
+                    rec.setdefault('erb_bcsm_type', _p(ctx_parts, 6))
+
+            elif ctx_lo == 'actioncomplete' and _p(ctx_parts, 6) == 'ConnectTo':
+                if 'connect' in ev_lo and 'requestreport' not in ev_lo:
+                    rec.setdefault('connect_num', _p(ctx_parts, 9))
+
+        records.append(rec)
     return records
 
 
-def process_main_log(file_pattern, fsmid, out_handle):
+def process_main_log(file_pattern, fsmid, out_handle, section_label: str = ''):
     """
     Four-pass extraction with smart backtracking:
     Pass 1: Identify FSMId lines and threads
@@ -397,7 +684,8 @@ def process_main_log(file_pattern, fsmid, out_handle):
     """
     logging.info("<----Starting new log extract run---->")
     logging.info("Executing log extract logic for FSMId: %s", fsmid)
-    out_handle.write(f"{'='*20} SECTION: Log Extract {'='*20}\n")
+    _sec = section_label or 'Log Extract'
+    out_handle.write(f"{'='*20} SECTION: {_sec} {'='*20}\n")
 
     target_fsmid = fsmid.lower()
     files = get_files(file_pattern)
@@ -606,16 +894,42 @@ def extract_tids(log_path):
     return sorted(tids)
 
 
+def extract_tids_from_tcap_for_fsmids(tcap_glob, fsmids):
+    """Scan TcapServer logs for lines containing any of the given FSMId strings and
+    return 8-char hex TIDs found in bracket patterns on those lines.
+
+    Used for FSMIds (e.g. cleanup FSMIds) that don't emit otid/dtid text in the
+    callservice log, so their TIDs can't be seeded by extract_tids().
+    """
+    if not fsmids:
+        return []
+    needles = {f.lower() for f in fsmids}
+    tids: set = set()
+    for fpath in get_files(tcap_glob):
+        try:
+            with open_file(fpath) as f:
+                for line in f:
+                    ll = line.lower()
+                    if not any(n in ll for n in needles):
+                        continue
+                    for m in _TCAP_BRACKET_TID_RE.finditer(line):
+                        t = m.group(1).lower()
+                        if t != '00000000':   # skip null TID
+                            tids.add(t)
+        except (IOError, OSError) as e:
+            logging.warning("TID scan error %s: %s", fpath, e)
+    return sorted(tids)
+
+
 TSHARK_TRUNCATED = "cut short in the middle of a packet"
 
 
 def build_tshark_filter(tids, first_ts=None, last_ts=None):
-    """Build tshark display filter matching any TID as otid or dtid, optionally bounded by time."""
+    """Build tshark display filter matching any TID (otid or dtid) via tcap.tid."""
     tid_parts = []
     for tid in tids:
         colon = _tid_to_colon(tid)
-        tid_parts.append(f'tcap.otid == {colon}')
-        tid_parts.append(f'tcap.dtid == {colon}')
+        tid_parts.append(f'tcap.tid == {colon}')
     tid_clause = ' || '.join(tid_parts)
     if first_ts is None and last_ts is None:
         return tid_clause
@@ -1067,7 +1381,7 @@ def _extract_tids_dechunked(pcap_files, trace_filter):
 def extract_tids_from_pcap_packets(pcap_files, display_filter=None):
     """Extract TCAP TIDs from PCAP files via tshark field extraction.
 
-    Runs tshark on each file with -T fields -e tcap.otid -e tcap.dtid.
+    Runs tshark on each file with -T fields -e tcap.tid.
     If display_filter is given, only matching packets are inspected.
     Returns a sorted list of unique 8-character lowercase hex TID strings.
     """
@@ -1079,8 +1393,7 @@ def extract_tids_from_pcap_packets(pcap_files, display_filter=None):
             cmd.extend(['-Y', display_filter])
         cmd.extend([
             '-T', 'fields',
-            '-e', 'tcap.otid',
-            '-e', 'tcap.dtid',
+            '-e', 'tcap.tid',
             '-E', 'separator=\t',
         ])
         logging.debug("Running: %s", shlex.join(cmd))
@@ -1466,7 +1779,13 @@ def process_tcap_logs(file_pattern, tcap_tids, out_handle, tcap_pcap_path=None):
                     if block_dialog is None:
                         block_dialog = did
                     elif did != block_dialog:
-                        break
+                        # '0' is a placeholder used before a real dialog ID is assigned
+                        # (e.g. "Received from App BEGIN Dialog [0:fsmid]"). Allow the
+                        # transition from 0 → real ID without breaking the block.
+                        if block_dialog == '0':
+                            block_dialog = did
+                        else:
+                            break
                 block_lines.append(ln)
                 block_positions.append((fp, lno))
 
@@ -1731,8 +2050,7 @@ def _enrich_flow_records_from_pcap(flow_records, pcap_path, tcap_tids, tid_to_di
         hex_str = re.sub(r'[^0-9a-fA-F]', '', tid)
         if len(hex_str) == 8:
             colon = _tid_to_colon(hex_str)
-            filter_parts.append(f'tcap.otid == {colon}')
-            filter_parts.append(f'tcap.dtid == {colon}')
+            filter_parts.append(f'tcap.tid == {colon}')
 
     if not filter_parts:
         return
@@ -1903,7 +2221,8 @@ def _parse_signode_ips(signode_args: list) -> dict:
 
 def generate_transaction_html(flow_records, html_path, display_id,
                               pcap_path=None, tcap_tids=None, tid_to_dialog=None,
-                              detail_records=None, node_ip_map=None):
+                              detail_records=None, node_ip_map=None,
+                              correlation_meta=None):
     """Generate HTML with 4-participant mermaid sequence diagram per transaction.
 
     Participants: Remote Entity → SmartSTP → TCAP instance → CallService instance.
@@ -1913,6 +2232,29 @@ def generate_transaction_html(flow_records, html_path, display_id,
         node_ip_map = {}
     if detail_records is None:
         detail_records = []
+
+    # Remap detail records whose dialog_id='0' (placeholder before real ID is assigned)
+    # to the real dialog ID used by other records for the same FSMId.
+    # e.g. SentBeginMAP gets logged with dialog_id=0; later events use the real dialog_id.
+    _fsmid_real_did: dict = {}   # fsmid → first real (non-0, non-empty) dialog_id seen
+    for _dr in detail_records:
+        _dr_did = _dr.get('dialog_id', '')
+        _dr_fid = _dr.get('fsmid', '')
+        if _dr_did and _dr_did != '0' and _dr_fid and _dr_fid not in _fsmid_real_did:
+            _fsmid_real_did[_dr_fid] = _dr_did
+    for _dr in detail_records:
+        if _dr.get('dialog_id', '') == '0':
+            _real = _fsmid_real_did.get(_dr.get('fsmid', ''))
+            if _real:
+                _dr['dialog_id'] = _real
+
+    # Map each dialog_id to the FSMId that owns it (from tagged detail records).
+    did_to_fsmid: dict = {}
+    for _dr in detail_records:
+        _did = _dr.get('dialog_id', '')
+        _fid = _dr.get('fsmid', '')
+        if _did and _fid and _did not in did_to_fsmid:
+            did_to_fsmid[_did] = _fid
 
     if pcap_path and os.path.exists(pcap_path) and tcap_tids and tid_to_dialog:
         _enrich_flow_records_from_pcap(flow_records, pcap_path,
@@ -1970,6 +2312,53 @@ def generate_transaction_html(flow_records, html_path, display_id,
             anom['remote_entity'] = anom.get('remote_entity', '') or 'Network'
             anomaly_records.append(anom)
 
+    # TcapServer-only records: for cleanup FSMIds that send MAP transactions without
+    # producing any DetailedTrace events. Scoped to known cleanup FSMIds to avoid
+    # polluting the diagram with collateral TcapServer dialogs from nearby calls.
+    _TCAP_DLG_FSMID_RE = re.compile(r'Dialog\s*\[\d+:([0-9a-fA-F]{10,})\]')
+    _TCAP_MSG_TYPE_RE  = re.compile(r'(?:BEGIN|CONTINUE|END|UNIDIRECTIONAL)', re.IGNORECASE)
+    all_detail_dids = {r.get('dialog_id', '') for r in detail_records if r.get('dialog_id')}
+    _detail_fsmids  = {r.get('fsmid', '') for r in detail_records if r.get('fsmid')}
+    # Only consider cleanup FSMIds as candidates (forwarded legs always have DetailTrace)
+    _cleanup_fsmid_set: set = set()
+    if correlation_meta:
+        _cleanup_fsmid_set = {f.lower() for f in (correlation_meta.get('cleanup_fsmids') or [])}
+    tcap_only_records: list = []
+    for r in flow_records:
+        if r.get('source') == 'pcap':
+            continue
+        did = r.get('dialog_id', '')
+        if not did or did in all_detail_dids:
+            continue
+        # Infer FSMId and message type from TcapServer block lines
+        blk_fsmid = ''
+        msg_type_hint = ''
+        for ln in r.get('lines', []):
+            if not blk_fsmid:
+                m_fid = _TCAP_DLG_FSMID_RE.search(ln)
+                if m_fid:
+                    blk_fsmid = m_fid.group(1).lower()
+            if not msg_type_hint:
+                m_mt = _TCAP_MSG_TYPE_RE.search(ln)
+                if m_mt:
+                    msg_type_hint = m_mt.group(0).capitalize()
+        # Only show blocks from known cleanup FSMIds that lack DetailTrace coverage
+        if not blk_fsmid or blk_fsmid not in _cleanup_fsmid_set:
+            continue
+        if blk_fsmid in _detail_fsmids:
+            continue
+        # Build a synthetic label: app_name or msg_type
+        app_nm = r.get('app_name', '') or msg_type_hint or 'MAP'
+        rec = dict(r)
+        rec['source']        = 'tcap_only'
+        rec['remote_entity'] = 'Network'
+        rec['pcap']          = {}
+        rec['event_name']    = app_nm
+        rec['fsmid']         = blk_fsmid
+        if blk_fsmid and did not in did_to_fsmid:
+            did_to_fsmid[did] = blk_fsmid
+        tcap_only_records.append(rec)
+
     def _ts_to_sec(ts: str) -> float:
         try:
             t = ts.strip()
@@ -1995,6 +2384,43 @@ def generate_transaction_html(flow_records, html_path, display_id,
         used_pcap_idxs[did].add(best_i)
         return best_r.get('pcap', {})
 
+    # Per-dialog, per-direction sorted list of (ts_sec, tcap_instance) from TcapServer
+    # flow_records.  Lets each detail record get the TCAP instance that actually handled
+    # that specific message rather than a single dialog-level fallback.
+    _did_flows_in:  dict = defaultdict(list)   # did -> [(ts_sec, tcap_instance), ...]
+    _did_flows_out: dict = defaultdict(list)   # did -> [(ts_sec, tcap_instance), ...]
+    for _fr in flow_records:
+        if _fr.get('source') == 'pcap':
+            continue
+        _fdid = _fr.get('dialog_id', '')
+        if not _fdid:
+            continue
+        _fts = _ts_to_sec(_fr.get('timestamp', ''))
+        _fti = _fr.get('tcap_instance', '') or 'TcapServer'
+        if _fr.get('direction', 'in') == 'out':
+            _did_flows_out[_fdid].append((_fts, _fti))
+        else:
+            _did_flows_in[_fdid].append((_fts, _fti))
+    for _lst in _did_flows_in.values():
+        _lst.sort()
+    for _lst in _did_flows_out.values():
+        _lst.sort()
+    _used_fi: dict = defaultdict(set)
+    _used_fo: dict = defaultdict(set)
+
+    def _best_tcap(did: str, dirn: str, ref_sec: float) -> str:
+        """Return the tcap_instance of the TcapServer block closest in time to ref_sec."""
+        if dirn == 'out':
+            flows, used = _did_flows_out[did], _used_fo[did]
+        else:
+            flows, used = _did_flows_in[did], _used_fi[did]
+        candidates = [(i, f) for i, f in enumerate(flows) if i not in used]
+        if not candidates:
+            return did_meta.get(did, {}).get('tcap_instance', 'TcapServer')
+        best_i, best_f = min(candidates, key=lambda x: abs(x[1][0] - ref_sec))
+        used.add(best_i)
+        return best_f[1]
+
     # Build all_msgs: detail + anomaly + orphaned PCAP
     all_msgs: list = []
 
@@ -2006,7 +2432,8 @@ def generate_transaction_html(flow_records, html_path, display_id,
             continue           # PCAP is authoritative — drop unmatched detail records
         merged = dict(r)
         merged['cs_instance']   = meta.get('cs_instance', 'CallService')
-        merged['tcap_instance'] = meta.get('tcap_instance', '')
+        merged['tcap_instance'] = _best_tcap(
+            did, r.get('direction', 'in'), _ts_to_sec(r.get('timestamp', '')))
         merged['pcap']          = pentry
         if pentry.get('ts'):
             merged['timestamp'] = pentry['ts']
@@ -2018,8 +2445,8 @@ def generate_transaction_html(flow_records, html_path, display_id,
         pentry = _best_pcap_entry(did, r.get('timestamp', ''))
         merged = dict(r)
         merged['cs_instance']   = meta.get('cs_instance', 'CallService')
-        merged['tcap_instance'] = meta.get('tcap_instance',
-                                            r.get('tcap_instance', 'TcapServer'))
+        merged['tcap_instance'] = (r.get('tcap_instance')
+                                   or meta.get('tcap_instance', 'TcapServer'))
         merged['pcap']          = pentry
         if merged['remote_entity'] == 'Network' and pentry:
             proto = pentry.get('protocol', '')
@@ -2029,6 +2456,17 @@ def generate_transaction_html(flow_records, html_path, display_id,
                 merged['remote_entity'] = 'Network-MAP'
         if pentry.get('ts'):
             merged['timestamp'] = pentry['ts']
+        all_msgs.append(merged)
+
+    for r in tcap_only_records:
+        did    = r.get('dialog_id', '')
+        meta   = did_meta.get(did, {})
+        merged = dict(r)
+        merged['cs_instance']   = (r.get('cs_instance')
+                                   or meta.get('cs_instance', 'CallService'))
+        merged['tcap_instance'] = (r.get('tcap_instance')
+                                   or meta.get('tcap_instance', 'TcapServer'))
+        merged['pcap']          = {}
         all_msgs.append(merged)
 
     for did, recs in pcap_by_did.items():
@@ -2170,12 +2608,15 @@ def generate_transaction_html(flow_records, html_path, display_id,
             fields.append(('⚠', 'TcapServer responded directly to network'))
 
         # ── application-layer ────────────────────────────────────────────
-        if 'initialdp' in op.lower():
-            imsi = pcap.get('imsi', '')
+        op_lo  = op.lower()
+        dirn_r = r.get('direction', '').lower()
+
+        if 'initialdp' in op_lo:
+            imsi = pcap.get('imsi', '') or r.get('imsi', '')
             if imsi:
                 fields.append(('IMSI', imsi))
-            cg_num = pcap.get('e164_cg', '')
-            cd_num = pcap.get('e164_cd', '')
+            cg_num = pcap.get('e164_cg', '') or r.get('calling_number', '')
+            cd_num = pcap.get('e164_cd', '') or r.get('called_number', '')
             if not cg_num:
                 for ln in r.get('lines', []):
                     m = _CS_CALL_RE.search(ln)
@@ -2186,9 +2627,42 @@ def generate_transaction_html(flow_records, html_path, display_id,
                 fields.append(('CallingNumber', cg_num))
             if cd_num:
                 fields.append(('CalledNumber', cd_num))
+            # Forwarding reason for correlated (FTN) calls
+            if correlation_meta:
+                _rec_fsmid = r.get('fsmid', '')
+                _fwd = (correlation_meta.get('fwd_fsmids') or {}).get(_rec_fsmid)
+                if _fwd:
+                    _reason_label = {'busy': 'Busy', 'no_reply': 'No Reply',
+                                     'not_reachable': 'Not Reachable'}.get(_fwd[1], _fwd[1])
+                    fields.append(('FwdReason', _reason_label))
 
-        if 'connect' in op.lower() and 'requestreport' not in op.lower():
-            conn_num = pcap.get('e164_cd', '')
+        # MAP SendParameters request → IMSI sent to HLR
+        if 'sendparameters' in op_lo and dirn_r == 'out':
+            imsi_val = r.get('imsi', '') or pcap.get('imsi', '')
+            if imsi_val:
+                fields.append(('IMSI', imsi_val))
+
+        # MAP SendParameters response → MSISDN and any forwarding numbers returned
+        if 'sendparameters' in op_lo and dirn_r == 'in':
+            hex_p = r.get('hex_payload', '')
+            if hex_p:
+                msisdn = _find_msisdn_from_hex(hex_p)
+                if msisdn:
+                    fields.append(('MSISDN', msisdn))
+                ftns_sp = _find_ftns_from_hex(hex_p)
+                if ftns_sp:
+                    fields.append(('FTN', ', '.join(ftns_sp)))
+
+        # InsertSubscriberData request → ForwardedToNumber list
+        if 'insertsubscriberdata' in op_lo and dirn_r == 'out':
+            hex_p = r.get('hex_payload', '')
+            if hex_p:
+                ftns_isd = _find_ftns_from_hex(hex_p)
+                if ftns_isd:
+                    fields.append(('FTN', ', '.join(ftns_isd)))
+
+        if 'connect' in op_lo and 'requestreport' not in op_lo:
+            conn_num = pcap.get('e164_cd', '') or r.get('connect_num', '')
             if not conn_num:
                 for ln in r.get('lines', []):
                     m = _CS_CONNECT_RE.search(ln)
@@ -2198,10 +2672,40 @@ def generate_transaction_html(flow_records, html_path, display_id,
             if conn_num:
                 fields.append(('ConnectedNumber', conn_num))
 
-        if 'requestreport' in op.lower() or 'eventreport' in op.lower():
-            bcasm_val = pcap.get('cam_bcasm', '')
-            if bcasm_val:
-                fields.append(('eventTypeBCSM', str(bcasm_val)))
+        if 'requestreport' in op_lo:
+            # RRBCSM: show all monitored BCSM events decoded from hex payload
+            hex_p = r.get('hex_payload', '')
+            bcsm_ints = _find_bcsm_types_in_hex(hex_p) if hex_p else []
+            if bcsm_ints:
+                fields.append(('BCSMs', ', '.join(
+                    BCASM_EVENT_MAP.get(v, str(v)) for v in bcsm_ints)))
+            else:
+                bcasm_val = pcap.get('cam_bcasm', '')
+                if bcasm_val:
+                    fields.append(('eventTypeBCSM', str(bcasm_val)))
+            monmode_val = pcap.get('cam_monmode', '')
+            if monmode_val:
+                fields.append(('monitorMode', str(monmode_val)))
+
+        elif 'eventreport' in op_lo:
+            # ERBCSM: show the specific BCSM event that triggered
+            erb_type = r.get('erb_bcsm_type', '')
+            if erb_type:
+                try:
+                    v = int(erb_type)
+                    fields.append(('BCSMEvent', BCASM_EVENT_MAP.get(v, str(v))))
+                except ValueError:
+                    fields.append(('BCSMEvent', erb_type))
+            else:
+                hex_p = r.get('hex_payload', '')
+                m_b = re.search(r'(?i)8001([0-9a-f]{2})', hex_p) if hex_p else None
+                if m_b:
+                    v = int(m_b.group(1), 16)
+                    fields.append(('BCSMEvent', BCASM_EVENT_MAP.get(v, str(v))))
+                else:
+                    bcasm_val = pcap.get('cam_bcasm', '')
+                    if bcasm_val:
+                        fields.append(('eventTypeBCSM', str(bcasm_val)))
             monmode_val = pcap.get('cam_monmode', '')
             if monmode_val:
                 fields.append(('monitorMode', str(monmode_val)))
@@ -2324,7 +2828,7 @@ def generate_transaction_html(flow_records, html_path, display_id,
         _actor_margin = max(10, min(80, _max_chars * 7 // 10))
         _init = (f'%%{{init: {{"sequence":{{"actorMargin":{_actor_margin},'
                  f'"messageMargin":10,"noteMargin":6,"fontSize":18,'
-                 f'"noteFontSize":14,"wrap":true}}}}}}%%')
+                 f'"noteFontSize":14,"wrap":true,"mirrorActors":true}}}}}}%%')
 
         lines = [_init, "sequenceDiagram"]
         # 1. Remote participant — short name only (SPC in footnote)
@@ -2444,6 +2948,66 @@ def generate_transaction_html(flow_records, html_path, display_id,
 </div>
 <h1>Call Flow: {display_id}</h1>
 """.format(display_id=display_id)
+
+    # Correlation banner (shown when forwarded legs or cleanup FSMIds were found)
+    if correlation_meta and (correlation_meta.get('fwd_fsmids')
+                             or correlation_meta.get('cleanup_fsmids')):
+        cm = correlation_meta
+        fwd_rows = ''
+        for fwd_id, (ftn, reason) in (cm.get('fwd_fsmids') or {}).items():
+            reason_label = {'busy': 'Busy', 'no_reply': 'No Reply',
+                            'not_reachable': 'Not Reachable'}.get(reason, reason)
+            fwd_rows += (
+                f'<tr>'
+                f'<td style="padding:2px 12px;font-family:monospace">{fwd_id}</td>'
+                f'<td style="padding:2px 12px">{reason_label}</td>'
+                f'<td style="padding:2px 12px;font-family:monospace">{ftn}</td>'
+                f'</tr>\n'
+            )
+        ftn_summary = ' &nbsp;|&nbsp; '.join(filter(None, [
+            (f'busy={cm["busy"]}'              if cm.get('busy')          else ''),
+            (f'noReply={cm["no_reply"]}'       if cm.get('no_reply')      else ''),
+            (f'notReachable={cm["not_reachable"]}' if cm.get('not_reachable') else ''),
+        ]))
+        fwd_section = ''
+        if fwd_rows:
+            fwd_section = (
+                f'<p style="margin:2px 0 6px;color:var(--muted)">FTNs: {ftn_summary}</p>'
+                '<table style="border-collapse:collapse;font-size:.83rem">'
+                '<tr><th style="text-align:left;padding:2px 12px">Forwarded FSMId</th>'
+                '<th style="text-align:left;padding:2px 12px">Forward Reason</th>'
+                '<th style="text-align:left;padding:2px 12px">FTN</th></tr>'
+                + fwd_rows + '</table>'
+            )
+        cln_rows = ''
+        for cln_id in (cm.get('cleanup_fsmids') or []):
+            cln_rows += (
+                f'<tr>'
+                f'<td style="padding:2px 12px;font-family:monospace">{cln_id}</td>'
+                f'<td style="padding:2px 12px">RESTORE-ISD-SENT-FROM-CLEANUPRULE</td>'
+                f'</tr>\n'
+            )
+        cln_section = ''
+        if cln_rows:
+            cln_section = (
+                '<p style="margin:10px 0 4px;font-weight:600">Cleanup FSMIds</p>'
+                '<table style="border-collapse:collapse;font-size:.83rem">'
+                '<tr><th style="text-align:left;padding:2px 12px">Cleanup FSMId</th>'
+                '<th style="text-align:left;padding:2px 12px">Trigger</th></tr>'
+                + cln_rows + '</table>'
+            )
+        html += (
+            '<details open style="margin-bottom:18px;font-size:.85rem;'
+            'background:var(--surface);border:1px solid var(--border);'
+            'border-radius:8px;padding:10px 16px">'
+            '<summary style="cursor:pointer;font-weight:600;color:var(--accent)">'
+            '&#9432; VMCC Forwarding Correlation</summary>'
+            f'<p style="margin:6px 0 4px">Primary: <code>{display_id}</code>'
+            f' &nbsp;|&nbsp; A#: <code>{cm.get("a_number","")}</code>'
+            f' &nbsp;|&nbsp; IMSI: <code>{cm.get("imsi","")}</code></p>'
+            + fwd_section + cln_section +
+            '</details>\n'
+        )
 
     for t_idx, (tx_key, tx_flows) in enumerate(transactions.items()):
         has_anom = any(r.get('source') == 'anomaly' for r in tx_flows)
@@ -2645,10 +3209,34 @@ def generate_transaction_html(flow_records, html_path, display_id,
         ) if (footnote or bcasm_legend or monmode_legend) else ''
 
         safe_key = tx_key.replace('"', '&quot;').replace('<', '&lt;')
+        # Annotate with FSMId when multiple FSMIds are present
+        _tx_fsmid = ''
+        if did_to_fsmid:
+            _tx_did = tx_key[7:] if tx_key.startswith('Dialog-') else ''
+            if _tx_did:
+                _tx_fsmid = did_to_fsmid.get(_tx_did, '')
+            if not _tx_fsmid:
+                for _r in tx_flows:
+                    _f = _r.get('fsmid', '')
+                    if _f:
+                        _tx_fsmid = _f
+                        break
+        # Build label: show FSMId + role suffix (Forwarded reason or Cleanup)
+        _fsmid_role = ''
+        if _tx_fsmid and correlation_meta:
+            _fwd = (correlation_meta.get('fwd_fsmids') or {}).get(_tx_fsmid)
+            if _fwd:
+                _fsmid_role = ' — ' + {'busy': 'Busy', 'no_reply': 'No Reply',
+                                        'not_reachable': 'Not Reachable'}.get(_fwd[1], _fwd[1])
+            elif _tx_fsmid in (correlation_meta.get('cleanup_fsmids') or []):
+                _fsmid_role = ' — Cleanup'
+        _fsmid_tag = (f' <span style="font-size:.8em;font-weight:normal;'
+                      f'color:var(--muted)">({_tx_fsmid}{_fsmid_role})</span>'
+                      if _tx_fsmid else '')
         html += f"""
   <div class="tx-box">
     <div class="tx-header">
-      <h2>Transaction: {safe_key}</h2>
+      <h2>Transaction: {safe_key}{_fsmid_tag}</h2>
       <button class="copy-btn" onclick="copyDiagram(this)">📷 Copy</button>
     </div>
     <div class="mermaid">
@@ -2665,7 +3253,7 @@ def generate_transaction_html(flow_records, html_path, display_id,
   let isDark = true;
   function mermaidCfg(theme) {
     return { startOnLoad:false, theme,
-             sequence:{ mirrorActors:false, useMaxWidth:false, fontSize:18 } };
+             sequence:{ mirrorActors:true, useMaxWidth:false, fontSize:18 } };
   }
   async function renderAll(theme) {
     mermaid.initialize(mermaidCfg(theme));
@@ -2894,6 +3482,21 @@ def main():
     if node_ip_map:
         logging.info("Explicit signode IPs: %s", node_ip_map)
 
+    # Discover correlated FSMIds from DNISCallsMap FTN forwarding (one level).
+    corr_meta: dict = {}
+    correlated_fsmids: list = []
+    if args.main and _summary_patterns and _detail_glob:
+        correlated_fsmids, corr_meta = discover_correlated_fsmids(
+            args.main, args.id, _summary_patterns, _detail_glob)
+    _seen_ids = {args.id.lower()}
+    _fwd_list = [f for f in correlated_fsmids if f.lower() not in _seen_ids
+                 and not _seen_ids.add(f.lower())]
+    _cln_list = [f for f in (corr_meta.get('cleanup_fsmids') or [])
+                 if f.lower() not in _seen_ids and not _seen_ids.add(f.lower())]
+    all_fsmids: list = [args.id] + _fwd_list + _cln_list
+    if len(all_fsmids) > 1:
+        logging.info("Extracting %d FSMId(s): %s", len(all_fsmids), ', '.join(all_fsmids))
+
     flow_records:            list = []
     tcap_tids:               list = []
     tid_to_dialog:           dict = {}
@@ -2901,17 +3504,52 @@ def main():
     tcap_pcap_path                = None
 
     try:
+        _sum_pats   = [p for p in args.trace if _is_summary_trace(p)]
+        _det_pats   = [p for p in args.trace if _is_detail_trace(p)]
+        _other_pats = [p for p in args.trace
+                       if not _is_summary_trace(p) and not _is_detail_trace(p)]
+        _multi = len(all_fsmids) > 1
+
         with open(log_output_path, 'w') as out_file:
-            for _pattern in args.trace:
-                _header = _extract_trace_prefix(_pattern)
-                process_simple_search(_pattern, args.id, _header, out_file)
+            # 1. Summary trace — all FSMIds
+            for _fsmid in all_fsmids:
+                for _pattern in _sum_pats:
+                    _header = _extract_trace_prefix(_pattern)
+                    _section = f"{_header} [{_fsmid}]" if _multi else _header
+                    process_simple_search(_pattern, _fsmid, _section, out_file)
+
+            # 2. Detailed trace — all FSMIds
+            for _fsmid in all_fsmids:
+                for _pattern in _det_pats:
+                    _header = _extract_trace_prefix(_pattern)
+                    _section = f"{_header} [{_fsmid}]" if _multi else _header
+                    process_simple_search(_pattern, _fsmid, _section, out_file)
+
+            # 3. Other trace patterns (if any) — all FSMIds
+            for _fsmid in all_fsmids:
+                for _pattern in _other_pats:
+                    _header = _extract_trace_prefix(_pattern)
+                    _section = f"{_header} [{_fsmid}]" if _multi else _header
+                    process_simple_search(_pattern, _fsmid, _section, out_file)
+
+            # 4. Main callservice logs — all FSMIds
             if args.main:
-                process_main_log(args.main, args.id, out_file)
+                for _fsmid in all_fsmids:
+                    _mlabel = f"Log Extract [{_fsmid}]" if _multi else 'Log Extract'
+                    process_main_log(args.main, _fsmid, out_file, section_label=_mlabel)
 
             # --- TcapServer extraction (runs inside the same output file) ---
             if args.tcap:
-                out_file.flush()   # ensure process_main_log output is on disk before reading it back
+                out_file.flush()   # ensure all log output is on disk before reading it back
                 tcap_tids = extract_tids(log_output_path)
+                # Supplement: cleanup FSMIds don't emit otid/dtid in callservice log,
+                # so seed their TIDs directly from TcapServer log bracket patterns.
+                _cln_ids = corr_meta.get('cleanup_fsmids') or []
+                if _cln_ids:
+                    _cln_tids = extract_tids_from_tcap_for_fsmids(args.tcap, _cln_ids)
+                    if _cln_tids:
+                        logging.info("Cleanup FSMId TID supplement: %s", _cln_tids)
+                        tcap_tids = sorted(set(tcap_tids) | set(_cln_tids))
                 logging.info("TcapServer search: %d TCAP TID(s)", len(tcap_tids))
 
                 # Generate TcapServer PCAP first — needed for Phase 3 timestamp matching
@@ -2929,16 +3567,17 @@ def main():
 
                 if args.tcap_event:
                     search_terms = (
-                        {args.id.lower()}
+                        {f.lower() for f in all_fsmids}
                         | {t.replace(':', '') for t in tcap_tids}
                         | dialog_ids
                     )
                     process_tcap_events(args.tcap_event, search_terms, out_file)
 
             if _detail_glob:
-                detail_records_for_html = parse_detail_trace_records(
-                    _detail_glob, args.id)
-                logging.info("DetailedTrace: %d in/out records",
+                for _fsmid in all_fsmids:
+                    detail_records_for_html += parse_detail_trace_records(
+                        _detail_glob, _fsmid)
+                logging.info("DetailedTrace: %d in/out records (all FSMIds)",
                              len(detail_records_for_html))
 
         print(f"Log extraction complete. Output written to: {log_output_path}")
@@ -2964,10 +3603,14 @@ def main():
                         tz_for_trace = _parse_timezone(args.timezone)
                     except Exception:
                         pass
-                summary_fields = (parse_summary_trace_fields(_summary_glob, args.id)
-                                  if _summary_glob else [])
-                detail_sccp    = (parse_detail_trace_sccp_fields(_detail_glob, args.id)
-                                  if _detail_glob else [])
+                summary_fields = []
+                if _summary_glob:
+                    for _fsmid in all_fsmids:
+                        summary_fields += parse_summary_trace_fields(_summary_glob, _fsmid)
+                detail_sccp = []
+                if _detail_glob:
+                    for _fsmid in all_fsmids:
+                        detail_sccp += parse_detail_trace_sccp_fields(_detail_glob, _fsmid)
                 trace_filter, t_min, t_max = build_trace_based_filter(
                     summary_fields, detail_sccp, tz_for_trace)
                 if trace_filter:
@@ -3012,7 +3655,8 @@ def main():
                                   tcap_tids=tcap_tids,
                                   tid_to_dialog=tid_to_dialog,
                                   detail_records=detail_records_for_html,
-                                  node_ip_map=node_ip_map)
+                                  node_ip_map=node_ip_map,
+                                  correlation_meta=corr_meta if corr_meta else None)
 
     if tcap_pcap_path and os.path.exists(tcap_pcap_path):
         os.remove(tcap_pcap_path)
