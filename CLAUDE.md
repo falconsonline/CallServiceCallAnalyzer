@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Does
 
-Extracts and correlates telecom call logs for a specific call identified by its **FSMId** (StateMachineId / CallId). Given FSMId `2e277b400013022`, the tool:
-1. Greps SummaryTrace and DetailedTrace log files for that ID
-2. Runs a 4-pass smart extraction on main callservice logs (backtrack, thread-follow, ASN.1 block capture)
-3. Extracts TcapServer thread-blocks correlated by TCAP Transaction IDs found in the output
-4. Converts DK/SS7 hex dumps in TcapServer logs to PCAP via `hexlog2pcap`
-5. Filters real PCAP captures by TCAP TID using tshark → dechunk SCTP → re-filter
-6. Optionally generates an HTML mermaid sequence diagram of the TCAP transaction flow
+Extracts and correlates telecom call logs for a specific call identified by its **FSMId** (StateMachineId / CallId). Supports SDS7-based applications: CallService, iCampaign, WSMS. Given FSMId `2e277b400013022`, the tool:
+1. Greps SummaryTrace, DetailTrace, WSMSTrace, CampaignTrace, and other trace logs for that ID
+2. Runs a 4-pass smart extraction on main application logs (backtrack, thread-follow, ASN.1 block capture)
+3. Discovers correlated FSMIds via DNISCallsMap FTN forwarding and extracts them in the same run
+4. Extracts TcapServer thread-blocks correlated by TCAP Transaction IDs found in the output
+5. Converts DK/SS7 hex dumps in TcapServer logs to PCAP via `hexlog2pcap`
+6. Filters real PCAP captures by TCAP TID using tshark → dechunk SCTP → re-filter
+7. Optionally generates an HTML mermaid sequence diagram of the TCAP transaction flow
 
 ## Running the Tool
 
@@ -74,22 +75,52 @@ Register custom parsers/decoders with `register_parser()` / `register_decoder()`
 
 Key functions and their roles:
 
+**Trace extraction**
+
 | Function | Role |
 |---|---|
-| `process_main_log()` | 4-pass callservice log extraction: identify FSMId lines → smart backtrack → forward-scan thread context → extract with ASN.1 block capture |
+| `process_simple_search()` | Greps a trace file group (SummaryTrace, DetailTrace, WSMSTrace, etc.) for an FSMId; writes one output section per call |
+| `parse_detail_trace_records()` | Parses DetailTrace lines into structured records for HTML diagram and PCAP correlation |
+| `discover_correlated_fsmids()` | Finds forwarded FSMIds via DNISCallsMap FTN entries in the main log; returns correlated + cleanup FSMId lists |
+
+**Main log extraction**
+
+| Function | Role |
+|---|---|
+| `process_main_log()` | 4-pass extraction: identify FSMId lines → smart backtrack → forward-scan thread context → extract with ASN.1 block capture |
+
+**TCAP / TcapServer**
+
+| Function | Role |
+|---|---|
 | `process_tcap_logs()` | TcapServer thread-block extraction; 2-phase: hex TID match → dialog ID expansion (3 rounds) |
 | `process_tcap_pcap()` | Converts TcapServer DK hex dumps to PCAP via `hexlog2pcap.convert()` then filters by TID |
-| `process_pcap()` | Filters real PCAP captures: per-file tshark → merge → dechunk SCTP → re-filter |
+| `process_tcap_events()` | Extracts TcapServerEvent log entries matching TID search terms |
+| `extract_tids()` | Scans extracted log output for 8-hex-char TCAP TIDs using `TID_RE` |
+| `extract_tids_from_tcap_for_fsmids()` | Seeds TIDs for cleanup FSMIds directly from TcapServer log bracket patterns |
+
+**PCAP extraction and filtering**
+
+| Function | Role |
+|---|---|
+| `process_pcap()` | Filters real PCAP captures: per-file tshark → merge → dechunk SCTP → re-filter by TID |
+| `process_pcap_from_traces()` | Alternate PCAP extraction path using SummaryTrace/DetailTrace SCCP fields and timestamps when no main log is available |
+| `build_trace_based_filter()` | Builds tshark display filter from SummaryTrace SCCP fields + DetailTrace timestamp window |
 | `dechunk_sctp_stream()` | Splits SCTP frames containing multiple DATA chunks into one-frame-per-chunk using scapy |
+
+**HTML sequence diagram**
+
+| Function | Role |
+|---|---|
 | `generate_transaction_html()` | Builds mermaid sequence diagram HTML; uses Union-Find to group TID pairs into transactions |
 | `_enrich_flow_records_from_pcap()` | Queries PCAP with tshark field extraction to add msg_type, CgPA, CdPA to flow records |
-| `extract_tids()` | Scans extracted log output for 8-hex-char TCAP TIDs using `TID_RE` |
-| `discover_correlated_fsmids()` | Finds forwarded FSMIds via DNISCallsMap FTN entries in the main log |
+| `_detect_our_ips()` | Auto-detects local signode IP addresses from PCAP frames by vote-counting; overridden by `--signode` |
 
 ### Log Format Assumptions
 
-- Main callservice logs: pipe-delimited (`|`) with thread name in field matching `Thread-\d+` or `Rule Executor \d+`, FSMId in field 5 before the first colon
-- TcapServer logs: pipe-delimited with 8-hex-char thread ID in field 4; blocks delimited by "Received from n/w" / "Received from App" lines
+- Main application logs (CallService, iCampaign, WSMS): pipe-delimited (`|`) with thread name in field matching `Thread-\d+` or `Rule Executor \d+`, FSMId in field 5 before the first colon
+- TcapServer logs: pipe-delimited with 8-hex-char thread ID in field 4; blocks delimited by "Received from n/w" / "Received from App" / "Sending to n/w" / "Sending to App" lines
+- Trace logs (SummaryTrace, DetailTrace, WSMSTrace, CampaignTrace): grepped directly for FSMId; section header derived from filename prefix via `_extract_trace_prefix()`
 - Input files may be `.gz` compressed; `open_file()` handles both
 
 ## Directory Layout
