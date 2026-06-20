@@ -1,6 +1,6 @@
 # TcapServer Handling — Design & Implementation Reference
 
-TcapServer sits between the signalling network (SmartSTP) and CallService. Its logs record every TCAP message received from and sent to both sides. This document covers how `extract-callservice-logs.py` extracts, correlates, and classifies TcapServer log blocks for a given FSMId.
+TcapServer sits between the signalling network (SmartSTP) and CallService. Its logs record every TCAP message received from and sent to both sides. This document covers how `extract-sds7-logs.py` extracts, correlates, and classifies TcapServer log blocks for a given FSMId.
 
 ---
 

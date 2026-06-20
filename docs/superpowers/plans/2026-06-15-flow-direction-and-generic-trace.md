@@ -4,7 +4,7 @@
 
 **Goal:** Fix HTML sequence diagram showing all arrows as inbound, cap main-log extraction at "Releasing state machine", and replace `-s`/`-d` flags with a unified `--trace` flag.
 
-**Architecture:** All changes are in `extract-callservice-logs.py`. Bug A is a one-line fix in `process_tcap_logs`. Bug B replaces `_detect_our_ips` with a timestamp-matched per-record voting approach. The release cut-off adds a dict to PASS 1 and a list-filter in PASS 2.5. The `--trace` flag adds `_extract_trace_prefix` + `_is_summary_trace` + `_is_detail_trace` helpers, updates argparse, and rewires all `args.summary`/`args.detail` call sites.
+**Architecture:** All changes are in `extract-sds7-logs.py`. Bug A is a one-line fix in `process_tcap_logs`. Bug B replaces `_detect_our_ips` with a timestamp-matched per-record voting approach. The release cut-off adds a dict to PASS 1 and a list-filter in PASS 2.5. The `--trace` flag adds `_extract_trace_prefix` + `_is_summary_trace` + `_is_detail_trace` helpers, updates argparse, and rewires all `args.summary`/`args.detail` call sites.
 
 **Tech Stack:** Python 3, pytest, argparse, existing scapy/tshark dependencies unchanged.
 
@@ -14,7 +14,7 @@
 
 | File | Changes |
 |---|---|
-| `extract-callservice-logs.py` | Fix line 1516; replace `_detect_our_ips` (lines 1593–1629); extend PASS 1 loop (lines 371–386); update PASS 2.5 (lines 436–437); add three helpers near line 265; update argparse (lines 2721–2757); rewire ~6 call sites in `main()` |
+| `extract-sds7-logs.py` | Fix line 1516; replace `_detect_our_ips` (lines 1593–1629); extend PASS 1 loop (lines 371–386); update PASS 2.5 (lines 436–437); add three helpers near line 265; update argparse (lines 2721–2757); rewire ~6 call sites in `main()` |
 | `tests/test_trace_pcap.py` | Fix 4 stale `build_tshark_filter` tests; add 7 new tests across the four tasks |
 
 ---
@@ -97,7 +97,7 @@ git commit -m "fix: update build_tshark_filter tests to match otid/dtid implemen
 `outgoing = forwarded_to_app or sent_to_nw` at line 1516 marks blocks with "Sending to App" (inbound) as outgoing. Fix: `outgoing = sent_to_nw` only.
 
 **Files:**
-- Modify: `extract-callservice-logs.py:1516`
+- Modify: `extract-sds7-logs.py:1516`
 - Modify: `tests/test_trace_pcap.py` (add 1 test)
 
 - [ ] **Step 1: Write the failing test**
@@ -171,7 +171,7 @@ Expected: `test_tcapserver_sending_to_app_is_inbound` FAILS (direction is 'out' 
 
 Note: `test_tcapserver_sending_to_nw_is_outbound` may also fail depending on how the log blocks are parsed — both are expected to fail until the fix.
 
-- [ ] **Step 3: Fix line 1516 in extract-callservice-logs.py**
+- [ ] **Step 3: Fix line 1516 in extract-sds7-logs.py**
 
 Find:
 ```python
@@ -202,7 +202,7 @@ Expected: all tests pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add extract-callservice-logs.py tests/test_trace_pcap.py
+git add extract-sds7-logs.py tests/test_trace_pcap.py
 git commit -m "fix: TcapServer 'Sending to App' is inbound, not outgoing (Bug A)"
 ```
 
@@ -213,7 +213,7 @@ git commit -m "fix: TcapServer 'Sending to App' is inbound, not outgoing (Bug A)
 Replace the first-record-wins approach with per-detail-record timestamp matching + IP vote counting. The old code adds both the remote IP and our IP to `our_ips` when the first PCAP record for a dialog is outbound while the first detail record says 'in', poisoning direction detection.
 
 **Files:**
-- Modify: `extract-callservice-logs.py:1593-1629` (replace `_detect_our_ips`)
+- Modify: `extract-sds7-logs.py:1593-1629` (replace `_detect_our_ips`)
 - Modify: `tests/test_trace_pcap.py` (add 2 tests)
 
 - [ ] **Step 1: Write the failing test**
@@ -363,7 +363,7 @@ Expected: all tests pass.
 - [ ] **Step 6: Syntax check**
 
 ```bash
-python3 -m py_compile extract-callservice-logs.py && echo OK
+python3 -m py_compile extract-sds7-logs.py && echo OK
 ```
 
 Expected: `OK`
@@ -371,7 +371,7 @@ Expected: `OK`
 - [ ] **Step 7: Commit**
 
 ```bash
-git add extract-callservice-logs.py tests/test_trace_pcap.py
+git add extract-sds7-logs.py tests/test_trace_pcap.py
 git commit -m "fix: replace first-record-wins in _detect_our_ips with timestamp-matched vote counting (Bug B)"
 ```
 
@@ -382,7 +382,7 @@ git commit -m "fix: replace first-record-wins in _detect_our_ips with timestamp-
 After the FSMId's "Releasing state machine" line, only include at most `TRAILING_AFTER_RELEASE = 3` further no-fsmid lines on that thread. Lines beyond this cap belong to the next call on that thread.
 
 **Files:**
-- Modify: `extract-callservice-logs.py` — PASS 1 loop + constant + PASS 2.5 end
+- Modify: `extract-sds7-logs.py` — PASS 1 loop + constant + PASS 2.5 end
 - Modify: `tests/test_trace_pcap.py` (add 2 tests)
 
 - [ ] **Step 1: Write the failing tests**
@@ -463,7 +463,7 @@ Expected: `test_process_main_log_caps_lines_after_release` FAILS (`new_call_here
 
 - [ ] **Step 3: Add TRAILING_AFTER_RELEASE constant and release_indices to PASS 1**
 
-In `extract-callservice-logs.py`, find the line just before `for file_path in files:` in `process_main_log` (currently `MAX_LINES_IN_BLOCK = 1000`). Add the constant there:
+In `extract-sds7-logs.py`, find the line just before `for file_path in files:` in `process_main_log` (currently `MAX_LINES_IN_BLOCK = 1000`). Add the constant there:
 
 ```python
     MAX_LINES_IN_BLOCK = 1000
@@ -537,13 +537,13 @@ Expected: all tests pass.
 - [ ] **Step 7: Syntax check**
 
 ```bash
-python3 -m py_compile extract-callservice-logs.py && echo OK
+python3 -m py_compile extract-sds7-logs.py && echo OK
 ```
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add extract-callservice-logs.py tests/test_trace_pcap.py
+git add extract-sds7-logs.py tests/test_trace_pcap.py
 git commit -m "feat: cap main-log thread extraction after 'Releasing state machine'"
 ```
 
@@ -554,7 +554,7 @@ git commit -m "feat: cap main-log thread extraction after 'Releasing state machi
 These three helpers drive the `--trace` flag logic. Add them near `process_simple_search` (around line 265).
 
 **Files:**
-- Modify: `extract-callservice-logs.py` (add 3 functions before `process_simple_search`)
+- Modify: `extract-sds7-logs.py` (add 3 functions before `process_simple_search`)
 - Modify: `tests/test_trace_pcap.py` (add tests)
 
 - [ ] **Step 1: Write the failing tests**
@@ -621,7 +621,7 @@ python3 -m pytest tests/test_trace_pcap.py::test_extract_trace_prefix_strips_dat
 
 Expected: ImportError — functions don't exist yet.
 
-- [ ] **Step 3: Add the three helper functions to extract-callservice-logs.py**
+- [ ] **Step 3: Add the three helper functions to extract-sds7-logs.py**
 
 Insert the following block just before `def process_simple_search(` (around line 265):
 
@@ -696,13 +696,13 @@ Expected: all tests pass.
 - [ ] **Step 6: Syntax check**
 
 ```bash
-python3 -m py_compile extract-callservice-logs.py && echo OK
+python3 -m py_compile extract-sds7-logs.py && echo OK
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add extract-callservice-logs.py tests/test_trace_pcap.py
+git add extract-sds7-logs.py tests/test_trace_pcap.py
 git commit -m "feat: add _extract_trace_prefix, _is_summary_trace, _is_detail_trace helpers"
 ```
 
@@ -713,7 +713,7 @@ git commit -m "feat: add _extract_trace_prefix, _is_summary_trace, _is_detail_tr
 Replace `-s`/`-d` with `--trace`/`-f` in argparse and rewire all call sites in `main()`.
 
 **Files:**
-- Modify: `extract-callservice-logs.py` — argparse block + `main()` body
+- Modify: `extract-sds7-logs.py` — argparse block + `main()` body
 - Modify: `tests/test_trace_pcap.py` (update 1 existing test, add 2 new)
 
 - [ ] **Step 1: Write the failing tests**
@@ -750,7 +750,7 @@ python3 -m pytest tests/test_trace_pcap.py::test_trace_flag_in_help tests/test_t
 
 Expected: both FAIL (current code has `-s`/`-d` not `--trace`, and requires `-s`/`-d` not checked the same way).
 
-- [ ] **Step 3: Update argparse in extract-callservice-logs.py**
+- [ ] **Step 3: Update argparse in extract-sds7-logs.py**
 
 Find the argparse block in `main()` starting around line 2711. Replace the `-s`/`-d` argument definitions and update the epilog:
 
@@ -874,7 +874,7 @@ Replace with:
 - [ ] **Step 8: Syntax check**
 
 ```bash
-python3 -m py_compile extract-callservice-logs.py && echo OK
+python3 -m py_compile extract-sds7-logs.py && echo OK
 ```
 
 Expected: `OK`
@@ -898,7 +898,7 @@ Expected: all tests pass (including the existing `test_m_flag_is_optional`).
 - [ ] **Step 11: Smoke-test --help output manually**
 
 ```bash
-python3 extract-callservice-logs.py --help
+python3 extract-sds7-logs.py --help
 ```
 
 Verify:
@@ -909,7 +909,7 @@ Verify:
 - [ ] **Step 12: Smoke-test backward compat**
 
 ```bash
-python3 extract-callservice-logs.py -s "applogs/SummaryTrace*" -d "applogs/DetailTrace*" -i dummy 2>&1 | head -5
+python3 extract-sds7-logs.py -s "applogs/SummaryTrace*" -d "applogs/DetailTrace*" -i dummy 2>&1 | head -5
 ```
 
 Expected: does not crash with "unrecognized arguments" (may fail on missing files — that's fine).
@@ -917,7 +917,7 @@ Expected: does not crash with "unrecognized arguments" (may fail on missing file
 - [ ] **Step 13: Commit**
 
 ```bash
-git add extract-callservice-logs.py tests/test_trace_pcap.py
+git add extract-sds7-logs.py tests/test_trace_pcap.py
 git commit -m "feat: replace -s/-d with repeatable --trace/-f flag; auto-detect SummaryTrace/DetailTrace by name"
 ```
 

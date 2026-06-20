@@ -4,7 +4,7 @@ Date: 2026-06-11
 
 ## Summary
 
-Two independent enhancements to `extract-callservice-logs.py`:
+Two independent enhancements to `extract-sds7-logs.py`:
 
 1. Fix HTML sequence diagram showing all messages as inbound
 2. Replace `-s`/`-d` trace flags with a single repeatable `--trace` flag
@@ -113,7 +113,7 @@ No change to PASS 3/4; `target_context_indices` is already bounded before the ex
 Remove mandatory `-s`/`-d`. Add repeatable `--trace` / `-f`:
 
 ```bash
-python3 extract-callservice-logs.py \
+python3 extract-sds7-logs.py \
   --trace "applogs/SummaryTrace*" \
   --trace "applogs/DetailTrace*" \
   --trace "applogs/applog*" \
@@ -169,7 +169,7 @@ Sections written in the order `--trace` arguments appear on the command line. Ex
 
 | File | Changes |
 |---|---|
-| `extract-callservice-logs.py` | Fix `outgoing = sent_to_nw`; replace `_detect_our_ips` IP detection with counter; add `release_indices` to PASS 1; cap trailing lines in PASS 2.5; add `--trace`/`-f` flag; deprecate `-s`/`-d` as aliases; add prefix extraction helper; update `process_simple_search` call sites |
+| `extract-sds7-logs.py` | Fix `outgoing = sent_to_nw`; replace `_detect_our_ips` IP detection with counter; add `release_indices` to PASS 1; cap trailing lines in PASS 2.5; add `--trace`/`-f` flag; deprecate `-s`/`-d` as aliases; add prefix extraction helper; update `process_simple_search` call sites |
 
 No new files. No changes to `hexlog2pcap.py` or test files.
 

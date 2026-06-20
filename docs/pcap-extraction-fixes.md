@@ -2,7 +2,7 @@
 
 ## Background
 
-Scripts involved: `extract-callservice-logs.py`, `debug_detail_filter.py`
+Scripts involved: `extract-sds7-logs.py`, `debug_detail_filter.py`
 
 Test case: FSMId `2e277b400013022`, outgoing MAP InsertSubscriberData dialog.
 
@@ -261,5 +261,5 @@ Enable with `-v` / `--verbose`.
 
 | File | Changes |
 |---|---|
-| `extract-callservice-logs.py` | `process_pcap` gains `extra_tids` param; `main()` computes supplementary TIDs; `build_trace_based_filter` loses IMSI, gains TCAP msg type; `parse_detail_trace_sccp_fields` gains field 18; `build_tshark_filter` uses `tcap.otid`/`tcap.dtid`; `_extract_tids_dechunked` helper added; Pass 1 bounded by DetailedTrace time window; debug logging added |
+| `extract-sds7-logs.py` | `process_pcap` gains `extra_tids` param; `main()` computes supplementary TIDs; `build_trace_based_filter` loses IMSI, gains TCAP msg type; `parse_detail_trace_sccp_fields` gains field 18; `build_tshark_filter` uses `tcap.otid`/`tcap.dtid`; `_extract_tids_dechunked` helper added; Pass 1 bounded by DetailedTrace time window; debug logging added |
 | `debug_detail_filter.py` | `TCAP_MSG_TYPE_FILTER` gains `cont` alias; field [17] shown in debug output |
