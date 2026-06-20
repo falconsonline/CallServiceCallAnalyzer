@@ -375,3 +375,121 @@ CNSYS:IPADDR=172.26.131.2,IPADDR2=172.26.131.18,PER=0,AUTOACT=N;
 `IPADDR` and `IPADDR2` are the two IPs (primary and redundant) for that SmartSTP node.
 
 ---
+
+## 9. Output files reference
+
+All files are written to the directory specified by `-o` (default: `logs/`).
+
+The base filename is determined by:
+- **With `-n MyTestCase`:** `MyTestCase-{fsmid}-extract-{YYYYMMDD_HHMMSS}`
+- **Without `-n`:** `TestCase-{fsmid}-{YYYYMMDD_HHMMSS}`
+
+| File | When produced | Contents |
+|---|---|---|
+| `{base}.txt` | Always | All extracted content: one section per `-f` trace group, one section for main log (`-m`), one section for TcapServer (`-t`). Sections are separated by `==== SECTION: … ====` headers. |
+| `{base}_tcap.pcap` | When `-t` is given and TIDs are found | PCAP converted from TcapServer DK hex dumps, filtered by TCAP TID. |
+| `{base}.pcap` | When `-p` is given | Filtered real Sigtran PCAP containing only packets matching the call's TCAP TIDs. |
+| `{base}.html` | When `--html` is given | Self-contained HTML mermaid sequence diagram. Open in any browser. |
+| `logs/extract.log` | Always | Tool run log with INFO/DEBUG messages. Use `-v` for debug detail. |
+
+---
+
+## 10. CLI reference — `extract-sds7-logs.py`
+
+```
+python3 extract-sds7-logs.py [options]
+```
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `-f` / `--trace GLOB` | string (repeatable) | **Yes** | — | Glob pattern for a trace file group. Each `-f` produces a named section in the output. Files named `SummaryTrace*` and `DetailTrace*`/`DetailedTrace*` are auto-detected for PCAP correlation. |
+| `-i` / `--id FSMID` | string | **Yes** | — | FSMId / StateMachineId to extract. |
+| `-m` / `--main GLOB` | string | No | — | Glob for main application log files. Omit to skip main-log extraction. |
+| `-o` / `--output-dir DIR` | path | No | `logs/` | Output directory. Created automatically. |
+| `-p` / `--pcaps GLOB` | string | No¹ | — | Glob for PCAP capture files (`.pcap`, `.pcap.gz`). |
+| `-z` / `--timezone TZ` | string | No¹ | — | Timezone of the log system. IANA name or UTC offset (`+0400`, `-0500`). |
+| `-t` / `--tcap GLOB` | string | No² | — | Glob for TcapServer log files. |
+| `-te` / `--tcap-event GLOB` | string | No | — | Glob for TcapServerEvent log files. |
+| `-n` / `--testcase NAME` | string | No | — | Prefix for output filenames. Spaces become underscores. |
+| `-v` / `--debug` | flag | No | off | Enable verbose debug logging. |
+| `--html` | flag | No² | off | Generate HTML mermaid sequence diagram. |
+| `--signode NAME:IP1,IP2` | string (repeatable) | No | — | Map a node name to its Sigtran IPs. Overrides auto-detection. |
+| `-s` / `--summary GLOB` | string | — | — | *(Deprecated alias for `-f`. Accepted for backward compatibility, hidden from `--help`.)* |
+| `-d` / `--detail GLOB` | string | — | — | *(Deprecated alias for `-f`. Accepted for backward compatibility, hidden from `--help`.)* |
+
+¹ `-p` and `-z` are mutually mandatory: if either is given, both are required.
+² `--html` and `-t` are mutually mandatory: if `--html` is given, `-t` is required.
+
+---
+
+## 11. CLI reference — `hexlog2pcap.py`
+
+```
+python3 hexlog2pcap.py [infile] [outfile] [options]
+```
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `infile` | path (positional) | No³ | — | Input log file. |
+| `outfile` | path (positional) | No³ | — | Output base name; `.pcap` is appended. |
+| `-p` / `--parser NAME` | string | No | `dk` | Log parser to use. |
+| `-d` / `--decoder NAME` | string | No | `sccp` | Protocol decoder to use. |
+| `-v` / `--verbose` | flag | No | off | Verbose output. |
+| `--text2pcap PATH` | path | No | auto | Explicit path to `text2pcap` binary. |
+| `--timeformat FMT` | string | No | auto | `strptime` format for log timestamps. |
+| `--list` | flag | No | — | List registered parsers/decoders and exit. |
+
+³ `infile` and `outfile` are positional and required unless `--list` is used.
+
+---
+
+## 12. Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `ModuleNotFoundError: No module named 'scapy'` | scapy not installed | `pip install scapy` |
+| `tshark: command not found` | Wireshark CLI not on PATH | Install Wireshark; verify with `which tshark`. Tool also searches `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`. |
+| `ERROR: at least one -f/--trace argument is required` | Missing mandatory `-f` flag | Add `-f "applogs/SummaryTrace*"` |
+| `ERROR: -z/--timezone is required when -p is used` | `-p` given without `-z` | Run `date +"%z"` on the log system; pass result as `-z "+0400"` |
+| `ERROR: -t/--tcap is required when --html is used` | `--html` given without `-t` | Add `-t "applogs/TcapServer-0*"` |
+| Output `.txt` file is empty / no sections found | FSMId not present in the log files | Verify the FSMId with: `grep -r <FSMId> applogs/` |
+| TcapServer section is blank | TCAP TIDs not found in trace output | Use `-v` to inspect TID search terms in `logs/extract.log`; confirm TIDs appear in the trace with `grep -i "otid\|dtid" logs/<output>.txt` |
+| No packets in filtered PCAP | Wrong timezone or TIDs not in PCAP | Verify timezone: `date +"%z"` on log system. Confirm TIDs in PCAP: `tshark -r <file.pcap> -Y "tcap.tid" -T fields -e tcap.tid` |
+| HTML diagram is blank or shows only one node | TcapServer log not found or wrong glob | Check glob: `ls applogs/TcapServer-0*`; confirm files are present and readable |
+| `mergecap: command not found` | Wireshark CLI partially installed | Ensure `mergecap` is on PATH alongside `tshark` |
+| `text2pcap: command not found` | Wireshark CLI partially installed | Ensure `text2pcap` is on PATH, or pass `--text2pcap /path/to/text2pcap` to `hexlog2pcap.py` |
+
+---
+
+## 13. Glossary
+
+| Term | Definition |
+|---|---|
+| **ASN.1** | Abstract Syntax Notation One — the encoding used for TCAP/CAMEL/MAP protocol messages. The main application log contains ASN.1 decode blocks captured during extraction. |
+| **CAMEL** | Customised Applications for Mobile networks Enhanced Logic — the IN (Intelligent Network) protocol used by CallService for prepaid/postpaid call control. Carried over TCAP. |
+| **CampaignTrace** | Per-session trace log produced by iCampaign. File names match `CampaignTrace*`. |
+| **DetailTrace / DetailedTrace** | Detailed per-call protocol trace log. Contains CAMEL/MAP operation names, parameters, and state transitions. File names match `DetailTrace*` or `DetailedTrace*`. |
+| **DK / DKSS7** | Dialogic SS7 board log format. Hex dumps in this format are converted to PCAP by `hexlog2pcap.py`. |
+| **DLT** | Data Link Type — the link-layer type stored in a PCAP file header. DLT 141 = MTP3; DLT 142 = SCCP. |
+| **FSMId / StateMachineId** | Unique hex identifier for one call or session instance (e.g. `2e277b400013022`). The primary search key for all log extraction. |
+| **FTN (Forward-To Number)** | Forwarding destination in a DNISCallsMap entry. If a call is forwarded, the tool auto-discovers and extracts the correlated FSMId. |
+| **HLR** | Home Location Register — an SS7 network node that handles MAP queries for subscriber data. Appears as a remote entity in the HTML diagram. |
+| **iCampaign** | SDS7 campaign management application. Produces `CampaignTrace*` logs. |
+| **M2PA** | MTP2 Peer Adaptation Layer — one Sigtran variant for carrying SS7 MTP3 over IP. |
+| **M3UA** | MTP3 User Adaptation Layer — another Sigtran variant. Affects which tshark fields are used to extract SPC values. |
+| **MAP** | Mobile Application Part — the SS7 protocol used for HLR queries (send routing info, insert subscriber data, etc.). Carried over TCAP. |
+| **MTP3** | Message Transfer Part 3 — the SS7 network layer. Contains OPC/DPC (originating/destination SPC). |
+| **PCAP** | Packet capture file format (libpcap). Used for Sigtran (SS7-over-IP) traffic captures. Files may be `.pcap` or `.pcap.gz`. |
+| **SCCP** | Signalling Connection Control Part — SS7 transport layer above MTP3. Contains Called/Calling Party Address (CdPA/CgPA). |
+| **SCTP** | Stream Control Transmission Protocol — the IP transport for Sigtran. Frames may carry multiple DATA chunks; the tool dechunks these before filtering. |
+| **Sigtran** | Protocol family for carrying SS7 signalling over IP networks. Includes M2PA and M3UA variants. |
+| **SmartSTP** | Signalling Transfer Point — the signalling gateway node bridging SS7 and Sigtran IP. Also called "signode" in this tool. |
+| **SPC (Signalling Point Code)** | Network address of an SS7 node. Displayed as zone-region-sp (e.g. `3-100-1`) and decimal (e.g. `24577`). Distinguishes Physical SPC from Alias SPC in the HTML diagram. |
+| **SS7** | Signalling System No. 7 — the global telephone signalling standard. |
+| **SSP** | Service Switching Point — the switch that initiates CAMEL IN calls (the calling network node). Appears as a remote entity in the HTML diagram. |
+| **SummaryTrace** | High-level per-call event log. One line per significant event. File names match `SummaryTrace*`. |
+| **TCAP** | Transaction Capabilities Application Part — the SS7 application layer that multiplexes CAMEL/MAP dialogs. Each dialog identified by a Transaction ID (TID). |
+| **TID (Transaction ID)** | 4-byte hex value (e.g. `042e7fbe`) identifying one TCAP transaction. A call may span several TIDs (begin/continue/end across multiple nodes). |
+| **TcapServer** | SDS7 TCAP layer process. Produces `TcapServer-0*` logs. |
+| **VLR** | Visitor Location Register — an SS7 node that handles MAP queries for roaming subscribers. |
+| **WSMS** | SDS7 wireless messaging application. Produces `WSMSTrace*` logs. |
