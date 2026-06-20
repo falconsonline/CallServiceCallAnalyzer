@@ -489,7 +489,7 @@ python3 hexlog2pcap.py [infile] [outfile] [options]
 | **SSP** | Service Switching Point — the switch that initiates CAMEL IN calls (the calling network node). Appears as a remote entity in the HTML diagram. |
 | **SummaryTrace** | High-level per-call event log. One line per significant event. File names match `SummaryTrace*`. |
 | **TCAP** | Transaction Capabilities Application Part — the SS7 application layer that multiplexes CAMEL/MAP dialogs. Each dialog identified by a Transaction ID (TID). |
-| **TID (Transaction ID)** | 4-byte hex value (e.g. `042e7fbe`) identifying one TCAP transaction. A call may span several TIDs (begin/continue/end across multiple nodes). |
 | **TcapServer** | SDS7 TCAP layer process. Produces `TcapServer-0*` logs. |
+| **TID (Transaction ID)** | 4-byte hex value (e.g. `042e7fbe`) identifying one TCAP transaction. A call may span several TIDs (begin/continue/end across multiple nodes). |
 | **VLR** | Visitor Location Register — an SS7 node that handles MAP queries for roaming subscribers. |
 | **WSMS** | SDS7 wireless messaging application. Produces `WSMSTrace*` logs. |
